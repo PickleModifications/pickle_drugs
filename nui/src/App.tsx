@@ -14,13 +14,65 @@ type PlotStatus = {
     drug?: string;
     status?: "ready_plant" | "needs_water" | "ready_harvest" | "growing";
     growProgress?: number;   // 0..1
-    waterProgress?: number;  // 0..1
-    water?: number;
-    waterRequired?: number;
+    waterProgress?: number;  // 0..1 reservoir level
+    showWater?: boolean;
     budsLeft?: number;
 };
 
-type Mode = "idle" | "cutting" | "watering";
+type Mode = "idle" | "cutting" | "watering" | "planting";
+
+type PlantingPayload = { plotId: string };
+
+/**
+ * Bar that rAF-lerps its visible width toward the target value, so jumpy
+ * inputs (Lua bursts, percentages leaping in one tick) animate smoothly
+ * instead of snapping. `target` is 0..1.
+ */
+function SmoothBar({
+    target,
+    className,
+    speed = 6,
+}: {
+    target: number;
+    className?: string;
+    speed?: number; // higher = snappier, lower = smoother
+}) {
+    const [value, setValue] = useState(target);
+    const valueRef = useRef(target);
+    const targetRef = useRef(target);
+    const lastTsRef = useRef<number | null>(null);
+
+    useEffect(() => {
+        targetRef.current = Math.max(0, Math.min(1, target));
+    }, [target]);
+
+    useEffect(() => {
+        let raf = 0;
+        const tick = (ts: number) => {
+            const last = lastTsRef.current ?? ts;
+            const dt = Math.min(0.05, (ts - last) / 1000);
+            lastTsRef.current = ts;
+            const a = 1 - Math.exp(-speed * dt); // exponential approach
+            const next = valueRef.current + (targetRef.current - valueRef.current) * a;
+            valueRef.current = Math.abs(next - targetRef.current) < 0.0005
+                ? targetRef.current
+                : next;
+            setValue(valueRef.current);
+            raf = requestAnimationFrame(tick);
+        };
+        raf = requestAnimationFrame(tick);
+        return () => cancelAnimationFrame(raf);
+    }, [speed]);
+
+    return (
+        <div className="h-1.5 rounded-full bg-white/10 overflow-hidden">
+            <div
+                className={"h-full " + (className ?? "bg-primary")}
+                style={{ width: `${value * 100}%` }}
+            />
+        </div>
+    );
+}
 
 const TOP_BAR_LABELS: Record<NonNullable<PlotStatus["status"]>, string> = {
     ready_plant:   "Ready to Plant",
@@ -33,6 +85,8 @@ function App() {
     const [mode, setMode] = useState<Mode>("idle");
     const [heading, setHeading] = useState(0);
     const [waterLevel, setWaterLevel] = useState(1.0);
+    const [plantWaterLevel, setPlantWaterLevel] = useState(0.0);
+    const [showPlantWater, setShowPlantWater] = useState(false);
     const [plotStatus, setPlotStatus] = useState<PlotStatus | null>(null);
 
     useNuiEvent<PlotStatus>("plotStatus", (data) => {
@@ -68,6 +122,19 @@ function App() {
     });
     useNuiEvent<{ level: number }>("wateringLevel", (data) => {
         if (data?.level !== undefined) setWaterLevel(data.level);
+    });
+    useNuiEvent<{ level: number; show?: boolean }>("wateringPlantLevel", (data) => {
+        if (data?.level !== undefined) setPlantWaterLevel(data.level);
+        if (data?.show !== undefined) setShowPlantWater(data.show);
+    });
+
+    useNuiEvent<PlantingPayload>("openPlanting", () => {
+        setMode("planting");
+        requestAnimationFrame(() => rootRef.current?.focus());
+    });
+    useNuiEvent<void>("closePlanting", () => {
+        setMode("idle");
+        heldRef.current.clear();
     });
 
     useEffect(() => {
@@ -111,6 +178,19 @@ function App() {
         return () => window.clearInterval(tick);
     }, [mode]);
 
+    // ─── Planting tick: same stream shape as watering (cursor + A/D) ──────
+    useEffect(() => {
+        if (mode !== "planting") return;
+        const tick = window.setInterval(() => {
+            fetchNui("plantingInput", {
+                cursorX: cursorRef.current.x,
+                cursorY: cursorRef.current.y,
+                heldKeys: [...heldRef.current],
+            });
+        }, 16);
+        return () => window.clearInterval(tick);
+    }, [mode]);
+
     const cursorRef = useRef({ x: 0.5, y: 0.5 });
     const onMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
         cursorRef.current.x = e.clientX / window.innerWidth;
@@ -125,6 +205,9 @@ function App() {
             } else if (mode === "watering") {
                 fetchNui("wateringClose");
                 setMode("idle");
+            } else if (mode === "planting") {
+                fetchNui("plantingClose");
+                setMode("idle");
             }
             return;
         }
@@ -137,12 +220,26 @@ function App() {
         heldRef.current.delete(e.code);
     };
 
-    // Cutting click → forward cursor coords; Lua hit-tests against buds.
+    // Cutting fires on click (single-shot snip). Planting needs press +
+    // release: pressing on the capsule grabs it, releasing lets go, so
+    // forward both edges with a `pressed` flag for Lua to route.
     const onClick = (e: React.MouseEvent<HTMLDivElement>) => {
         if (mode !== "cutting") return;
         const x = e.clientX / window.innerWidth;
         const y = e.clientY / window.innerHeight;
         fetchNui("clickAt", { x, y });
+    };
+    const onMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+        if (mode !== "planting" || e.button !== 0) return;
+        const x = e.clientX / window.innerWidth;
+        const y = e.clientY / window.innerHeight;
+        fetchNui("plantingClick", { x, y, pressed: true });
+    };
+    const onMouseUp = (e: React.MouseEvent<HTMLDivElement>) => {
+        if (mode !== "planting" || e.button !== 0) return;
+        const x = e.clientX / window.innerWidth;
+        const y = e.clientY / window.innerHeight;
+        fetchNui("plantingClick", { x, y, pressed: false });
     };
 
     return (
@@ -153,6 +250,8 @@ function App() {
             onKeyDown={onKeyDown}
             onKeyUp={onKeyUp}
             onClick={onClick}
+            onMouseDown={onMouseDown}
+            onMouseUp={onMouseUp}
             onMouseMove={onMouseMove}
             onBlur={() => requestAnimationFrame(() => rootRef.current?.focus())}
             className="dark fixed inset-0 outline-none"
@@ -198,37 +297,31 @@ function App() {
                                         </span>
                                     )}
                                 </div>
-                                <div className="h-1.5 rounded-full bg-white/10 overflow-hidden">
-                                    <div
-                                        className={
-                                            "h-full transition-[width] duration-150 " +
-                                            (plotStatus.status === "needs_water"
-                                                ? "bg-amber-400"
-                                                : plotStatus.status === "ready_plant"
-                                                ? "bg-emerald-400"
-                                                : plotStatus.status === "ready_harvest"
-                                                ? "bg-primary"
-                                                : "bg-primary")
-                                        }
-                                        style={{
-                                            width:
-                                                plotStatus.status === "growing"
-                                                    ? `${(plotStatus.growProgress ?? 0) * 100}%`
-                                                    : plotStatus.status === "ready_harvest"
-                                                    ? "100%"
-                                                    : plotStatus.status === "needs_water"
-                                                    ? "100%"
-                                                    : plotStatus.status === "ready_plant"
-                                                    ? "100%"
-                                                    : "0%",
-                                        }}
-                                    />
-                                </div>
+                                <SmoothBar
+                                    target={
+                                        plotStatus.status === "growing"
+                                            ? plotStatus.growProgress ?? 0
+                                            : plotStatus.status === "ready_harvest"
+                                            ? 1
+                                            : plotStatus.status === "needs_water"
+                                            ? 1
+                                            : plotStatus.status === "ready_plant"
+                                            ? 1
+                                            : 0
+                                    }
+                                    className={
+                                        plotStatus.status === "needs_water"
+                                            ? "bg-amber-400"
+                                            : plotStatus.status === "ready_plant"
+                                            ? "bg-emerald-400"
+                                            : "bg-primary"
+                                    }
+                                />
                             </div>
 
                             {/* Bottom bar — water progress as a live percentage. Hidden
                                 when the plot has no water requirement (stage 0/3). */}
-                            {plotStatus.waterRequired !== undefined && plotStatus.waterRequired > 0 && (
+                            {plotStatus.showWater && (
                                 <div className="space-y-1">
                                     <div className="flex items-center justify-between text-[11px] tabular-nums">
                                         <span className="text-muted-foreground flex items-center gap-1">
@@ -239,14 +332,10 @@ function App() {
                                             {Math.round((plotStatus.waterProgress ?? 0) * 100)}%
                                         </span>
                                     </div>
-                                    <div className="h-1.5 rounded-full bg-white/10 overflow-hidden">
-                                        <div
-                                            className="h-full bg-sky-400 transition-[width] duration-150"
-                                            style={{
-                                                width: `${(plotStatus.waterProgress ?? 0) * 100}%`,
-                                            }}
-                                        />
-                                    </div>
+                                    <SmoothBar
+                                        target={plotStatus.waterProgress ?? 0}
+                                        className="bg-sky-400"
+                                    />
                                 </div>
                             )}
                         </CardContent>
@@ -286,17 +375,28 @@ function App() {
                                         {Math.round(waterLevel * 100)}%
                                     </span>
                                 </div>
-                                <div className="h-1.5 rounded-full bg-muted overflow-hidden">
-                                    <div
-                                        className="h-full bg-sky-400 transition-[width] duration-150"
-                                        style={{ width: `${waterLevel * 100}%` }}
-                                    />
-                                </div>
+                                <SmoothBar target={waterLevel} className="bg-sky-400" speed={10} />
                             </CardContent>
                         </Card>
                     </div>
-                    {/* Bottom hint bar */}
-                    <div className="absolute inset-x-0 bottom-10 flex justify-center pointer-events-none">
+                    {/* Bottom: plant water reservoir + hint. The reservoir card
+                        only shows when there's actually a plant to water — the
+                        server rejects pours pre-stage-1 anyway. */}
+                    <div className="absolute inset-x-0 bottom-10 flex flex-col items-center gap-3 pointer-events-none">
+                        {showPlantWater && (
+                            <Card className="w-[280px] bg-black/55 border-white/10">
+                                <CardContent className="py-3 px-4">
+                                    <div className="flex items-center gap-2 mb-2">
+                                        <Sprout className="h-4 w-4 text-emerald-400" />
+                                        <span className="text-xs text-muted-foreground">Plant Water</span>
+                                        <span className="ml-auto text-xs tabular-nums">
+                                            {Math.round(plantWaterLevel * 100)}%
+                                        </span>
+                                    </div>
+                                    <SmoothBar target={plantWaterLevel} className="bg-emerald-400" />
+                                </CardContent>
+                            </Card>
+                        )}
                         <Card className="w-[520px] bg-black/55 border-white/10">
                             <CardContent className="flex items-center gap-3 py-3">
                                 <Droplet className="h-4 w-4 text-sky-400" />

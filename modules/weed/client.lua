@@ -10,7 +10,8 @@ CreateThread(function()
         print("[pickle_drugs] weed: Config.Drugs.weed missing — was config/weed.lua loaded?")
         return
     end
-    if not cfg.stages or not cfg.stages[3] or not cfg.stages[3].buds then
-        print("[pickle_drugs] weed: stage 3 buds missing in config")
+    local harvest = Grow.HarvestStage(cfg)
+    if not cfg.stages or not cfg.stages[harvest] or not cfg.stages[harvest].buds then
+        print(("[pickle_drugs] weed: stage %d buds missing in config"):format(harvest))
     end
 end)

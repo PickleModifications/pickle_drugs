@@ -3,10 +3,11 @@
 RegisterNetEvent("pickle_drugs:debugOpenCutting", function()
     for _, id in ipairs(GetAllPlotIds() or {}) do
         local plot = GetPlotState(id)
-        if plot and plot.stage == 3 then
+        local drugCfg = plot and Config.Drugs[plot.drug]
+        if plot and drugCfg and plot.stage == Grow.HarvestStage(drugCfg) then
             OpenCuttingScene(id)
             return
         end
     end
-    print("[pickle_drugs] /growop: no stage-3 plot available")
+    print("[pickle_drugs] /growop: no harvestable plot available")
 end)

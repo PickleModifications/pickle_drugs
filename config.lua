@@ -48,47 +48,70 @@ Config.Drugs.weed = {
         ripped = "pickle_soil_ripbag_01",
     },
 
-    -- Total wall-clock from "seed planted" to "fully grown" (stage 3). When
-    -- set, it overrides individual stage `durationMs` values — the time is
-    -- split evenly across stages 1 + 2 (stage 3 is the harvestable end-cap
-    -- and stays at 0). Set to nil to use per-stage `durationMs` directly.
-    totalGrowMs = 15 * 1000, -- 30 minutes by default
+    -- Interactive planting scene (modules/planting). Player tilts the
+    -- capsule to drop the seed, then converges 4 soil-rubble clumps from a
+    -- small ring around the pot centre to bury it. The same rubble model
+    -- is re-spawned by modules/grow/client and stays put for the rest of
+    -- the grow until the plant is harvested.
+    planting = {
+        rubble        = "pickle_soil_rubble_01",
+        rubbleCount     = 4,       -- evenly spaced around the soil ring
+        rubbleRadius    = 0.09,    -- spawn-ring radius from pot centre (metres)
+        rubbleConvergeK = 0.75,    -- 0..1: how far each clump slides toward centre during planting; the persistent pile uses the same residual `(1 - K) * rubbleRadius`
+        rubbleSoilZ     = 0.0,    -- absolute Z offset from plot centre where the rubble pile sits
+        seedZ           = 0.325,   -- Z offset for the buried seed on top of `rubbleSoilZ`
+        tiltDropDeg   = 165.0,     -- |roll| past this snaps to 180° and drops the seed
+        cameraDistMul = 1.4,
+    },
 
-    -- 4 growth stages. `durationMs` is the per-stage fallback when
-    -- `totalGrowMs` is nil; advancing also requires `waterRequired` pours.
-    -- Stage 0 = empty plot, no plant. Stage 3 = harvestable.
+    -- Total wall-clock from "seed planted" to "fully grown". Split evenly
+    -- across the pre-harvest growing stages (1..N-1).
+    totalGrowMs = 30 * 1000, -- 10 seconds total
+
+    -- Water reservoir. The plant holds up to `waterCapacityMs` of growing
+    -- time; it depletes by real time and growth pauses when it hits 0.
+    -- One full pitcher tops the reservoir to 100% (5 registered pours of
+    -- `pourPerPlot = 0.20` each). Falls back to totalGrowMs/3 if unset.
+    waterCapacityMs = 10 * 60 * 1000,
+
+    -- Growth stages (1-indexed). Stages 1..N-1 share `totalGrowMs`
+    -- evenly — stage 1 is the empty/germinating phase (no plant model
+    -- yet) and counts as a full growing stage. Stage N is the
+    -- harvestable end-cap (carries the buds config).
     stages = {
-        [0] = { model = nil,                   durationMs = 0,             waterRequired = 0 },
-        [1] = { model = "pickle_weed_tree_01", durationMs = 5  * 60 * 1000, waterRequired = 1 },
-        [2] = { model = "pickle_weed_tree_02", durationMs = 10 * 60 * 1000, waterRequired = 2 },
-        [3] = {
+        { model = nil },
+        { model = "pickle_weed_tree_01" },
+        { model = "pickle_weed_tree_02" },
+        {
             model = "pickle_weed_tree_03",
-            durationMs = 0,
-            waterRequired = 0,
             buds = {
-                model     = "pickle_weed_bud_01",
-                hitRadius = 0.06,
+                model = "pickle_weed_bud_01",
                 offsets = {
-                    -- Front-left column
-                    { x = -0.1, y = 0.115, z = 0.985 },
-                    { x = -0.1, y = 0.115, z = 0.825 },
-                    { x = -0.1, y = 0.115, z = 0.665 },
-                    { x = -0.1, y = 0.115, z = 0.505 },
-                    -- Right column
-                    { x =  0.1, y = -0.115, z = 0.985 },
-                    { x =  0.1, y = -0.115, z = 0.825 },
-                    { x =  0.1, y = -0.115, z = 0.665 },
-                    { x =  0.1, y = -0.115, z = 0.505 },
-                    -- Front-right column
-                    { x =  0.1, y = 0.115, z = 0.89 },
-                    { x =  0.1, y = 0.115, z = 0.75 },
-                    { x =  0.1, y = 0.115, z = 0.585 },
-                    { x =  0.1, y = 0.115, z = 0.415 },
-                    -- Back-right column
-                    { x = -0.1, y = -0.115, z = 0.89 },
-                    { x = -0.1, y = -0.115, z = 0.75 },
-                    { x = -0.1, y = -0.115, z = 0.585 },
-                    { x = -0.1, y = -0.115, z = 0.415 },
+                    { x = 0.1168, y = 0.1394, z = 1.1584 },
+                    { x = -0.1088, y = 0.1374, z = 1.0830 },
+                    { x = -0.1128, y = -0.1312, z = 1.0828 },
+                    { x = 0.1146, y = -0.1352, z = 1.1584 },
+                    { x = 0.1640, y = 0.0046, z = 1.0058 },
+                    { x = 0.0004, y = 0.1748, z = 0.9408 },
+                    { x = -0.1752, y = -0.0026, z = 0.9412 },
+                    { x = -0.1738, y = -0.0038, z = 0.6710 },
+                    { x = -0.1760, y = -0.0004, z = 0.4072 },
+                    { x = -0.1044, y = -0.1214, z = 0.5450 },
+                    { x = -0.0012, y = -0.1674, z = 0.7358 },
+                    { x = -0.1102, y = -0.1280, z = 0.8044 },
+                    { x = 0.1032, y = -0.1380, z = 0.8740 },
+                    { x = 0.0012, y = -0.1678, z = 1.0066 },
+                    { x = 0.1066, y = -0.1302, z = 0.6082 },
+                    { x = 0.1650, y = 0.0094, z = 0.7370 },
+                    { x = 0.1086, y = 0.1298, z = 0.6084 },
+                    { x = -0.0018, y = 0.1708, z = 0.6704 },
+                    { x = -0.0996, y = 0.1280, z = 0.5458 },
+                    { x = -0.1062, y = 0.1308, z = 0.8038 },
+                    { x = 0.0030, y = -0.1656, z = 0.4728 },
+                    { x = 0.1024, y = -0.1254, z = 0.3450 },
+                    { x = 0.1752, y = 0.0064, z = 0.4728 },
+                    { x = 0.1164, y = 0.1270, z = 0.3478 },
+                    { x = -0.0002, y = 0.1734, z = 0.4062 },
                 },
             },
         },
@@ -114,11 +137,15 @@ Config.Drugs.weed = {
         pitcher       = "pickle_water_pot_01",
         liquid        = "pickle_water_liquid_01",
         liquidMaxZ    = 0.0,    -- liquid prop local Z at 100% full
-        liquidMinZ    = -0.18,  -- liquid prop local Z at 0% empty
+        liquidMinZ    = -0.11,  -- liquid prop local Z at 0% empty
         pourAngleDeg  = 65.0,   -- pitcher pitch past which water pours
         secondsPerFullPitcher = 4.0, -- seconds of continuous pouring to drain a full pitcher
         pourPerPlot   = 0.20,   -- 0..1 poured onto a plot to register one server-side pour
         cameraDistMul = 1.4,    -- framing pull-back for the watering scene
         partFx        = { dict = "core", name = "ent_amb_pouring_water_into_pot" },
+        -- Looped fx played on the pot while a pour stream is landing in
+        -- it — visualises the water filling the pot. Optional.
+        potFx         = { dict = "core", name = "ent_amb_pouring_water_into_pot" },
+        potFxZ        = 0.25,   -- vertical offset of the pot fx on the pot
     },
 }

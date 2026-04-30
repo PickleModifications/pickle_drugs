@@ -24,20 +24,23 @@ local function LoadPlots()
             if type(cutBuds) == "string" then
                 cutBuds = json.decode(cutBuds) or {}
             end
+            -- Legacy rows used 0-indexed stages; bump to 1-indexed.
+            local stage = tonumber(row.stage) or 0
+            if stage < 1 then stage = 1 end
             Plots[spot.id] = {
                 id              = row.id,
                 drug            = row.drug,
-                stage           = row.stage or 0,
+                stage           = stage,
                 stage_started_at = tonumber(row.stage_started_at) or 0,
-                water_count     = row.water_count or 0,
+                water_until     = tonumber(row.water_until) or 0,
                 cut_buds        = cutBuds or {},
                 updated_at      = tonumber(row.updated_at) or 0,
             }
         else
             Plots[spot.id] = Grow.NewPlot(spot)
             MySQL.insert.await(
-                "INSERT INTO pickle_drugs_plots (id, drug, stage, stage_started_at, water_count, cut_buds, updated_at) VALUES (?,?,?,?,?,?,?)",
-                { spot.id, spot.drug, 0, 0, 0, "[]", now() }
+                "INSERT INTO pickle_drugs_plots (id, drug, stage, stage_started_at, water_until, cut_buds, updated_at) VALUES (?,?,?,?,?,?,?)",
+                { spot.id, spot.drug, 1, 0, 0, "[]", now() }
             )
         end
     end
@@ -49,11 +52,11 @@ end
 local function PersistPlot(plot)
     plot.updated_at = now()
     MySQL.update.await(
-        "UPDATE pickle_drugs_plots SET stage=?, stage_started_at=?, water_count=?, cut_buds=?, updated_at=? WHERE id=?",
+        "UPDATE pickle_drugs_plots SET stage=?, stage_started_at=?, water_until=?, cut_buds=?, updated_at=? WHERE id=?",
         {
             plot.stage,
             plot.stage_started_at,
-            plot.water_count,
+            plot.water_until,
             json.encode(plot.cut_buds or {}),
             plot.updated_at,
             plot.id,
@@ -95,7 +98,7 @@ RegisterNetEvent("pickle_drugs:plant", function(plotId)
     local src = source
     local plot = Plots[plotId]
     if not plot then notify(src, "Plot not found", "error") return end
-    if plot.stage ~= 0 or plot.stage_started_at ~= 0 then
+    if plot.stage_started_at ~= 0 then
         notify(src, "Already planted", "error") return
     end
 
@@ -105,8 +108,10 @@ RegisterNetEvent("pickle_drugs:plant", function(plotId)
     -- Item requirement disabled for now — wire back via Inventory.GetItemCount /
     -- RemoveItem when an inventory item is set up for `drugCfg.seedItem`.
 
+    plot.stage            = 1
     plot.stage_started_at = now()
-    plot.water_count      = 0
+    plot.water_until      = 0
+    plot.cut_buds         = {}
     SyncPlot(plot, true)
     notify(src, "Seed planted", "success")
 end)
@@ -114,11 +119,21 @@ end)
 --- Register a single pour against a plot. Client decides when a pour
 --- "lands" (when its pitcher angle and proximity to the pot are right) and
 --- fires this; server just bumps the counter and re-resolves the stage.
-RegisterNetEvent("pickle_drugs:water", function(plotId)
+RegisterNetEvent("pickle_drugs:water", function(plotId, fraction)
     local plot = Plots[plotId]
     if not plot then return end
-    if plot.stage < 1 or plot.stage > 3 then return end
-    plot.water_count = (plot.water_count or 0) + 1
+    local drugCfg = Config.Drugs[plot.drug]
+    if not drugCfg then return end
+    local harvest = Grow.HarvestStage(drugCfg)
+    if plot.stage < 1 or plot.stage > harvest then return end
+    local default = (drugCfg.watering and drugCfg.watering.pourPerPlot) or 0.20
+    -- Client may send a partial fraction (e.g. flushing a sub-threshold
+    -- accumulator on scene close). Clamp to the configured pourPerPlot
+    -- so a malicious client can't grant itself a full pitcher per call.
+    local f = tonumber(fraction) or default
+    if f <= 0 then return end
+    if f > default then f = default end
+    Grow.AddWater(plot, drugCfg, now(), f)
     SyncPlot(plot, true)
 end)
 
@@ -137,12 +152,14 @@ end)
 RegisterNetEvent("pickle_drugs:cutBud", function(plotId, budIndex)
     local src = source
     local plot = Plots[plotId]
-    if not plot or plot.stage ~= 3 then return end
+    if not plot then return end
     budIndex = tonumber(budIndex)
     if not budIndex then return end
 
     local drugCfg = Config.Drugs[plot.drug]
-    local s3 = drugCfg and drugCfg.stages[3]
+    local harvest = drugCfg and Grow.HarvestStage(drugCfg) or 0
+    if plot.stage ~= harvest then return end
+    local s3 = drugCfg and drugCfg.stages[harvest]
     if not s3 or not s3.buds or not s3.buds.offsets then return end
     if budIndex < 1 or budIndex > #s3.buds.offsets then return end
 
@@ -202,11 +219,21 @@ CreateThread(function()
                         drug            VARCHAR(32)  NOT NULL,
                         stage           TINYINT      NOT NULL DEFAULT 0,
                         stage_started_at BIGINT      NOT NULL DEFAULT 0,
-                        water_count     TINYINT      NOT NULL DEFAULT 0,
+                        water_until     BIGINT       NOT NULL DEFAULT 0,
                         cut_buds        TEXT         NOT NULL,
                         updated_at      BIGINT       NOT NULL DEFAULT 0
                     )
                 ]])
+                -- Migrate from the old water_count column if upgrading.
+                local cols = MySQL.query.await(
+                    "SHOW COLUMNS FROM pickle_drugs_plots WHERE Field IN ('water_count','water_until')"
+                ) or {}
+                local has = {}
+                for _, c in ipairs(cols) do has[c.Field] = true end
+                if has.water_count and not has.water_until then
+                    MySQL.query.await("ALTER TABLE pickle_drugs_plots CHANGE water_count water_until BIGINT NOT NULL DEFAULT 0")
+                    MySQL.query.await("UPDATE pickle_drugs_plots SET water_until = 0")
+                end
                 LoadPlots()
             end)
             if not ok then

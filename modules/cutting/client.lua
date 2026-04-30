@@ -10,8 +10,9 @@ local CuttingState = nil
 --- boxes so the bud (which sits above the plant's bbox) is in shot.
 local function CreateCuttingCam(center, heading, drugCfg)
     local cam = drugCfg.cutting.camera or {}
-    local plantHash = joaat(drugCfg.stages[3].model)
-    local budHash   = joaat(drugCfg.stages[3].buds.model)
+    local harvest   = Grow.HarvestStage(drugCfg)
+    local plantHash = joaat(drugCfg.stages[harvest].model)
+    local budHash   = joaat(drugCfg.stages[harvest].buds.model)
 
     local pMin, pMax = GetModelDimensions(plantHash)
     local bMin, bMax = GetModelDimensions(budHash)
@@ -39,6 +40,49 @@ local function CreateCuttingCam(center, heading, drugCfg)
     SetCamActive(camera, true)
     RenderScriptCams(true, false, 0, true, true)
     return camera
+end
+
+-- Apple model used as an invisible raycast proxy for each attached bud.
+-- Attached entities don't participate in shape tests in FiveM, so we mirror
+-- each bud's world position with an unattached collidable apple. The proxy
+-- is what the click ray actually hits; we map its entity id back to a bud
+-- slot index. Refreshed on rotate and right before each click test.
+local PROXY_MODEL = "sf_prop_sf_apple_01a"
+
+local function SpawnBudProxies()
+    if not CuttingState then return end
+    local plot = GetPlotState(CuttingState.plotId)
+    if not plot then return end
+    local drugCfg = CuttingState.drugCfg
+    local hash = LoadModel(PROXY_MODEL)
+    if not hash then return end
+
+    CuttingState.budProxies = CuttingState.budProxies or {}
+    for _, idx in ipairs(Grow.RemainingBudIndexes(plot, drugCfg)) do
+        local bud = GetPlotBudEntity(CuttingState.plotId, idx)
+        if bud and DoesEntityExist(bud) and not CuttingState.budProxies[idx] then
+            local bc = GetEntityCoords(bud)
+            local proxy = CreateObject(hash, bc.x, bc.y, bc.z, false, false, false)
+            if proxy and DoesEntityExist(proxy) then
+                SetEntityCollision(proxy, true, false)
+                FreezeEntityPosition(proxy, true)
+                SetEntityVisible(proxy, Config.Debug == true, false)
+                CuttingState.budProxies[idx] = proxy
+            end
+        end
+    end
+    SetModelAsNoLongerNeeded(hash)
+end
+
+local function RefreshBudProxies()
+    if not CuttingState or not CuttingState.budProxies then return end
+    for idx, proxy in pairs(CuttingState.budProxies) do
+        local bud = GetPlotBudEntity(CuttingState.plotId, idx)
+        if bud and DoesEntityExist(bud) and proxy and DoesEntityExist(proxy) then
+            local bc = GetEntityCoords(bud)
+            SetEntityCoordsNoOffset(proxy, bc.x, bc.y, bc.z + 0.05, false, false, false)
+        end
+    end
 end
 
 --- Spawns a free scissors prop. The cutting thread positions it each frame
@@ -77,6 +121,7 @@ local function CleanupCuttingView(skipFade)
     local toDelete = {}
     for _, fb in ipairs(CuttingState.fallingBuds or {}) do toDelete[#toDelete + 1] = fb end
     for _, c in pairs(CuttingState.fallingCarriers or {}) do toDelete[#toDelete + 1] = c end
+    for _, p in pairs(CuttingState.budProxies or {}) do toDelete[#toDelete + 1] = p end
     if CuttingState.tool then toDelete[#toDelete + 1] = CuttingState.tool end
     for _, ent in ipairs(toDelete) do
         if ent and DoesEntityExist(ent) then DeleteEntity(ent) end
@@ -142,7 +187,7 @@ local function RunCuttingThread()
                 SetEntityCoordsNoOffset(tool, px, py, pz, false, false, false)
                 -- Face the scissors toward the camera with a slight downward
                 -- bias so the blades read as "ready to snip" from the player's view.
-                SetEntityRotation(tool, lerp(-15.0, 15.0, CuttingState.cursorY), 0.0, math.deg(math.atan(fy, fx)) - 90.0, 2, true)
+                SetEntityRotation(tool, lerp(5.0, -65.0, CuttingState.cursorY), 0.0, (math.deg(math.atan(fy, fx)) - 90.0) + lerp(-90.0, 90.0, CuttingState.cursorX), 2, true)
             end
 
             Wait(0)
@@ -158,10 +203,11 @@ function OpenCuttingScene(plotId)
 
     local plot   = GetPlotState(plotId)
     local spot   = GetPlotSpot(plotId)
-    if not plot or not spot or plot.stage ~= 3 then return end
+    if not plot or not spot then return end
 
     local drugCfg = Config.Drugs[plot.drug]
     if not drugCfg or not drugCfg.cutting then return end
+    if plot.stage ~= Grow.HarvestStage(drugCfg) then return end
 
     local center  = vector3(spot.coords.x, spot.coords.y, spot.coords.z)
     local heading = spot.coords.w or 0.0
@@ -192,6 +238,8 @@ function OpenCuttingScene(plotId)
         cursorX         = 0.5,
         cursorY         = 0.5,
     }
+
+    SpawnBudProxies()
 
     SetNuiFocus(true, true)
     SendNUIMessage({ action = "openCutting", data = { plantHeading = heading } })
@@ -229,6 +277,9 @@ RegisterNUICallback("rotate", function(data, cb)
     local delta = tonumber(data and data.delta) or 0.0
     CuttingState.plantHeading = (CuttingState.plantHeading + delta) % 360.0
     SetEntityHeading(plant, CuttingState.plantHeading)
+    -- Buds are attached, so they swing with the plant — proxies aren't,
+    -- so they need a manual sync to stay collocated for raycasts.
+    RefreshBudProxies()
     cb({ ok = true, heading = CuttingState.plantHeading })
 end)
 
@@ -246,25 +297,71 @@ RegisterNUICallback("clickAt", function(data, cb)
     if cx < 0 or cy < 0 then cb({ ok = false, hit = false }) return end
 
     local drugCfg = CuttingState.drugCfg
-    local s3 = drugCfg.stages[3]
+    local s3 = drugCfg.stages[Grow.HarvestStage(drugCfg)]
     if not s3 or not s3.buds then cb({ ok = true, hit = false }) return end
-    local radius = s3.buds.hitRadius or 0.06
 
-    -- Find the closest live bud entity within the cursor's radius.
-    local bestIdx, bestDist
-    for _, idx in ipairs(Grow.RemainingBudIndexes(plot, drugCfg)) do
-        local bud = GetPlotBudEntity(CuttingState.plotId, idx)
-        if bud and DoesEntityExist(bud) then
-            local bc = GetEntityCoords(bud)
-            local onScreen, sx, sy = World3dToScreen2d(bc.x, bc.y, bc.z)
-            if onScreen then
-                local dx, dy = sx - cx, sy - cy
-                local dist = math.sqrt(dx * dx + dy * dy)
-                if dist <= radius and (not bestDist or dist < bestDist) then
-                    bestIdx, bestDist = idx, dist
-                end
-            end
-        end
+    -- Build a camera-space ray through the cursor. Math mirrors the
+    -- per-frame scissors-positioning code: forward + right*sxOff - up*syOff
+    -- gives a point on the cursor's view ray; subtract camCoord to get the
+    -- direction.
+    local camCoord = GetCamCoord(CuttingState.cam)
+    local camRot   = GetCamRot(CuttingState.cam, 2)
+    local rx, _, rz = math.rad(camRot.x), math.rad(camRot.y), math.rad(camRot.z)
+    local fx = -math.sin(rz) * math.cos(rx)
+    local fy =  math.cos(rz) * math.cos(rx)
+    local fz =  math.sin(rx)
+    local rXx, rXy, rXz = math.cos(rz), math.sin(rz), 0.0
+    local upX = rXy * fz - rXz * fy
+    local upY = rXz * fx - rXx * fz
+    local upZ = rXx * fy - rXy * fx
+
+    local depth   = 1.0
+    local fovRad  = math.rad((drugCfg.cutting.camera and drugCfg.cutting.camera.fov) or 35.0)
+    local screenH = math.tan(fovRad * 0.5) * depth
+    local aspect  = GetAspectRatio(false) or 1.777
+    local screenW = screenH * aspect
+    local sxOff = (cx - 0.5) * 2.0 * screenW
+    local syOff = (cy - 0.5) * 2.0 * screenH
+
+    local pxw = camCoord.x + fx * depth + rXx * sxOff - upX * syOff
+    local pyw = camCoord.y + fy * depth + rXy * sxOff - upY * syOff
+    local pzw = camCoord.z + fz * depth + rXz * sxOff - upZ * syOff
+    local ddx, ddy, ddz = pxw - camCoord.x, pyw - camCoord.y, pzw - camCoord.z
+    local dlen = math.sqrt(ddx * ddx + ddy * ddy + ddz * ddz)
+    if dlen <= 0 then cb({ ok = true, hit = false }) return end
+    ddx, ddy, ddz = ddx / dlen, ddy / dlen, ddz / dlen
+
+    -- Make sure any newly-grown buds have proxies and existing ones are at
+    -- their bud's current world coords (in case the plant rotated since
+    -- last refresh). Then index proxies by entity for O(1) hit lookup.
+    SpawnBudProxies()
+    RefreshBudProxies()
+    local budByEntity = {}
+    for idx, proxy in pairs(CuttingState.budProxies or {}) do
+        if proxy and DoesEntityExist(proxy) then budByEntity[proxy] = idx end
+    end
+
+    -- Entities the ray should pass through: the floating scissors prop and
+    -- any in-flight cut buds + their invisible apple carriers.
+    local skipEntities = {}
+    if CuttingState.tool then skipEntities[CuttingState.tool] = true end
+    for _, fb in ipairs(CuttingState.fallingBuds or {}) do skipEntities[fb] = true end
+    for _, fc in pairs(CuttingState.fallingCarriers or {}) do skipEntities[fc] = true end
+
+    local range = 6.0
+    local fX, fY, fZ = camCoord.x, camCoord.y, camCoord.z
+    local bestIdx
+    for _ = 1, 6 do
+        local tX, tY, tZ = camCoord.x + ddx * range, camCoord.y + ddy * range, camCoord.z + ddz * range
+        local handle = StartShapeTestRay(fX, fY, fZ, tX, tY, tZ, 1 | 8 | 16, PlayerPedId(), 4)
+        local _, hit, endCoords, _, entity = GetShapeTestResult(handle)
+        if hit ~= 1 then break end
+        if budByEntity[entity] then bestIdx = budByEntity[entity] break end
+        if not skipEntities[entity] then break end
+        -- Step past the unwanted hit and re-cast.
+        fX = endCoords.x + ddx * 0.02
+        fY = endCoords.y + ddy * 0.02
+        fZ = endCoords.z + ddz * 0.02
     end
     if not bestIdx then cb({ ok = true, hit = false }) return end
 
@@ -272,6 +369,14 @@ RegisterNUICallback("clickAt", function(data, cb)
     -- despawned by the next plot update mid-fall.
     local bud = TakePlotBudEntity(CuttingState.plotId, bestIdx)
     if not bud or not DoesEntityExist(bud) then cb({ ok = true, hit = false }) return end
+
+    -- Bud is going away — drop its raycast proxy so subsequent clicks can't
+    -- hit-test against thin air.
+    if CuttingState.budProxies and CuttingState.budProxies[bestIdx] then
+        local p = CuttingState.budProxies[bestIdx]
+        if p and DoesEntityExist(p) then DeleteEntity(p) end
+        CuttingState.budProxies[bestIdx] = nil
+    end
 
     CuttingState.fallingBuds[#CuttingState.fallingBuds + 1] = bud
 

@@ -35,7 +35,7 @@ local function eachEntity(entities)
     return coroutine.wrap(function()
         if not entities then return end
         for k, v in pairs(entities) do
-            if k == "buds" or k == "capsule" then
+            if k == "buds" or k == "capsule" or k == "rubble" then
                 for _, e in pairs(v) do coroutine.yield(e) end
             else
                 coroutine.yield(v)
@@ -83,10 +83,24 @@ local function syncBaseProps(s, center, heading)
     end
 end
 
---- Adds/removes the capsule trio. Visible only at stage 0 with the seed
---- planted (stage_started_at > 0). Hash-equality early-outs avoid churn.
+--- Adds/removes the capsule trio. With the interactive planting scene
+--- enabled (drugCfg.planting set), capsule visuals are owned entirely by
+--- modules/planting/client during the plant flow and are never drawn here
+--- — the scene fires `pickle_drugs:plant` only after the seed has already
+--- been "buried" client-side, so a static capsule on the soil afterwards
+--- would be a duplicate.
 local function syncCapsule(s, plot, drugCfg, center, heading)
-    local need = plot.stage == 0 and (plot.stage_started_at or 0) > 0 and drugCfg.capsule
+    if drugCfg.planting then
+        -- Drop any capsule entities lingering from a pre-planting-scene
+        -- save and never spawn them.
+        for _, e in pairs(s.entities.capsule) do
+            if e and DoesEntityExist(e) then DeleteEntity(e) end
+        end
+        s.entities.capsule = {}
+        return
+    end
+
+    local need = plot.stage == 1 and (plot.stage_started_at or 0) > 0 and drugCfg.capsule
     local have = s.entities.capsule.capsule and DoesEntityExist(s.entities.capsule.capsule)
     if need and not have then
         local c = drugCfg.capsule
@@ -98,6 +112,61 @@ local function syncCapsule(s, plot, drugCfg, center, heading)
             if e and DoesEntityExist(e) then DeleteEntity(e) end
         end
         s.entities.capsule = {}
+    end
+end
+
+--- Soil rubble pile. Spawned once the plot is planted (stage_started_at >
+--- 0) and removed when the plot is reset back to "needs planting". The
+--- layout mirrors the planting scene's converged ring — same count, same
+--- angular spacing, same residual radius (5% of the spawn radius after
+--- the planting animation closes to 95%) — so the persistent pile reads
+--- identical to what the player just clicked into place.
+local function syncRubble(s, plot, drugCfg, center, _heading)
+    s.entities.rubble = s.entities.rubble or {}
+    local cfg  = drugCfg.planting
+    local need = cfg and cfg.rubble and (plot.stage_started_at or 0) > 0
+    local count = (cfg and cfg.rubbleCount) or 4
+    local zOff = (cfg and cfg.rubbleSoilZ) or 0.0
+
+    if not need then
+        for i, e in ipairs(s.entities.rubble) do
+            if e and DoesEntityExist(e) then DeleteEntity(e) end
+            s.entities.rubble[i] = nil
+        end
+        return
+    end
+
+    -- Same spawn-ring radius and convergence factor as the planting
+    -- scene — residual radius is `(1 - K) * rubbleRadius`.
+    local spawnRadius = cfg.rubbleRadius or 0.09
+    local k           = cfg.rubbleConvergeK or 0.95
+    local residual    = spawnRadius * (1.0 - k)
+
+    -- Mirror modules/planting/client → SpawnRubbleRing exactly.
+    local hash = LoadModel(cfg.rubble)
+    if not hash then return end
+
+    for i = 1, count do
+        local theta = (i - 1) * (2.0 * math.pi / count)
+        local x = center.x + math.cos(theta) * residual
+        local y = center.y + math.sin(theta) * residual
+        local z = center.z + zOff
+
+        local cur = s.entities.rubble[i]
+        if not cur or not DoesEntityExist(cur) then
+            local ent = CreateObjectNoOffset(hash, x, y, z, false, false, false)
+            if ent and DoesEntityExist(ent) then
+                SetEntityCollision(ent, true, false)
+                FreezeEntityPosition(ent, true)
+                s.entities.rubble[i] = ent
+            end
+        end
+    end
+    -- Trim any extras if the configured count shrunk.
+    for i = count + 1, #s.entities.rubble do
+        local e = s.entities.rubble[i]
+        if e and DoesEntityExist(e) then DeleteEntity(e) end
+        s.entities.rubble[i] = nil
     end
 end
 
@@ -132,7 +201,8 @@ end
 --- — so a plant swap (handled in syncPlant) effectively orphans them and
 --- this function rebuilds the set on the next call.
 local function syncBuds(s, plot, drugCfg, center, heading)
-    local stage3   = plot.stage == 3 and drugCfg.stages[3] or nil
+    local harvest  = Grow.HarvestStage(drugCfg)
+    local stage3   = plot.stage == harvest and drugCfg.stages[harvest] or nil
     local budsCfg  = stage3 and stage3.buds
 
     if not budsCfg or not s.entities.plant or not DoesEntityExist(s.entities.plant) then
@@ -181,26 +251,46 @@ end
 local function ApplyPlotState(spot, plot)
     PlotState[plot.id] = PlotState[plot.id] or {}
     local s = PlotState[plot.id]
+    -- Always update the cached spot/plot first so anything that reads
+    -- GetPlotState during a deferred apply gets the latest values.
     s.spot = spot
     s.plot = plot
-    s.entities = s.entities or { buds = {}, capsule = {} }
+
+    -- Re-entrancy guard: SpawnWorldProp yields inside LoadModel, so a
+    -- concurrent caller (init thread + plotUpdate event) can race here
+    -- and double-spawn pot/soil/plant. If a sync is already in flight,
+    -- mark that another apply is pending and let the running one re-run.
+    if s.applying then
+        s.applyPending = true
+        return
+    end
+    s.applying = true
+    s.entities = s.entities or { buds = {}, capsule = {}, rubble = {} }
 
     local drugCfg = Config.Drugs[plot.drug]
-    if not drugCfg then return end
+    if not drugCfg then s.applying = false return end
 
-    local center  = vector3(spot.coords.x, spot.coords.y, spot.coords.z)
-    local heading = spot.coords.w or 0.0
+    repeat
+        s.applyPending = false
+        local curSpot = s.spot
+        local curPlot = s.plot
+        local center  = vector3(curSpot.coords.x, curSpot.coords.y, curSpot.coords.z)
+        local heading = curSpot.coords.w or 0.0
 
-    syncBaseProps(s, center, heading)
-    syncCapsule(s, plot, drugCfg, center, heading)
-    syncPlant(s, plot, drugCfg, center, heading)
-    syncBuds(s, plot, drugCfg, center, heading)
+        syncBaseProps(s, center, heading)
+        syncCapsule(s, curPlot, drugCfg, center, heading)
+        syncPlant(s, curPlot, drugCfg, center, heading)
+        syncBuds(s, curPlot, drugCfg, center, heading)
+        syncRubble(s, curPlot, drugCfg, center, heading)
 
-    if PlotsHidden then SetPlotVisible(plot.id, false) end
+        if PlotsHidden then SetPlotVisible(curPlot.id, false) end
 
-    if not s.targetZoneId then
-        AttachTarget(plot.id)
-    end
+        if not s.targetZoneId then
+            AttachTarget(curPlot.id)
+        end
+    until not s.applyPending
+
+    s.applying = false
 end
 
 -- ─── Public API ─────────────────────────────────────────────────────────────
@@ -243,6 +333,25 @@ end
 function GetPlotPlantEntity(plotId)
     local s = PlotState[plotId]
     return s and s.entities and s.entities.plant or nil
+end
+
+function GetPlotPotEntity(plotId)
+    local s = PlotState[plotId]
+    return s and s.entities and s.entities.pot or nil
+end
+
+--- Toggles visibility on the persistent rubble pile. The planting scene
+--- uses this to hide it during the converging-clumps animation (the scene
+--- renders its own four rubble props at the ring positions) and re-show it
+--- once the scene tears down.
+function SetPlotRubbleVisible(plotId, visible)
+    local s = PlotState[plotId]
+    if not s or not s.entities or not s.entities.rubble then return end
+    for _, e in ipairs(s.entities.rubble) do
+        if e and DoesEntityExist(e) then
+            SetEntityVisible(e, visible, false)
+        end
+    end
 end
 
 -- Cutting / watering scenes use these to swap the world view for their own.
@@ -289,6 +398,9 @@ local function WaitForAllDrugModels()
         if drugCfg.capsule then
             add(drugCfg.capsule.capsule); add(drugCfg.capsule.cap); add(drugCfg.capsule.seed)
         end
+        if drugCfg.planting and drugCfg.planting.rubble then
+            add(drugCfg.planting.rubble)
+        end
         for _, stage in pairs(drugCfg.stages or {}) do
             add(stage.model)
             if stage.buds then add(stage.buds.model) end
@@ -319,10 +431,14 @@ local function BuildTargetOptions(spot, drugCfg)
             icon  = "fa-solid fa-seedling",
             canInteract = function()
                 local plot = GetPlotState(id)
-                return plot and plot.stage == 0 and (plot.stage_started_at or 0) == 0
+                return plot and (plot.stage_started_at or 0) == 0
             end,
             onSelect = function()
-                TriggerServerEvent("pickle_drugs:plant", id)
+                if drugCfg.planting and OpenPlantingScene then
+                    OpenPlantingScene(id)
+                else
+                    TriggerServerEvent("pickle_drugs:plant", id)
+                end
             end,
         },
         {
@@ -332,9 +448,12 @@ local function BuildTargetOptions(spot, drugCfg)
             canInteract = function()
                 local plot = GetPlotState(id)
                 if not plot then return false end
-                if plot.stage < 1 or plot.stage > 3 then return false end
-                local sCfg = drugCfg.stages[plot.stage]
-                return sCfg and (plot.water_count or 0) < (sCfg.waterRequired or 0)
+                local harvest = Grow.HarvestStage(drugCfg)
+                if plot.stage < 1 or plot.stage > harvest then return false end
+                -- Allow watering whenever the reservoir isn't full. Topping
+                -- up is up to the player; growth pauses if it runs dry.
+                local now = GetCloudTimeAsInt() * 1000
+                return Grow.WaterLevel(plot, drugCfg, now) < 0.999
             end,
             onSelect = function()
                 OpenWateringScene(id)
@@ -346,7 +465,8 @@ local function BuildTargetOptions(spot, drugCfg)
             icon  = "fa-solid fa-scissors",
             canInteract = function()
                 local plot = GetPlotState(id)
-                if not plot or plot.stage ~= 3 then return false end
+                if not plot then return false end
+                if plot.stage ~= Grow.HarvestStage(drugCfg) then return false end
                 return #Grow.RemainingBudIndexes(plot, drugCfg) > 0
             end,
             onSelect = function()
@@ -388,7 +508,12 @@ CreateThread(function()
     for _, plot in ipairs(plots) do
         local spot = FindSpot(plot.id)
         if spot then
-            PlotState[plot.id] = { spot = spot, plot = plot }
+            -- Preserve any entity refs already set up by a prior plotUpdate
+            -- broadcast — replacing the table here would leak the previously
+            -- spawned pot/plant and cause `syncBaseProps` to spawn doubles.
+            PlotState[plot.id] = PlotState[plot.id] or {}
+            PlotState[plot.id].spot = spot
+            PlotState[plot.id].plot = plot
             ApplyPlotState(spot, plot)
         end
     end
@@ -398,29 +523,45 @@ end)
 --- distribution and Config.GrowTimeMultiplier. Mirrors the logic in
 --- Grow.ResolveStage.
 local function StageDurationMs(drugCfg, stage)
-    local sCfg = drugCfg.stages[stage]
-    if not sCfg then return 0 end
     local mul = (Config and Config.GrowTimeMultiplier) or 1.0
-    if drugCfg.totalGrowMs and drugCfg.totalGrowMs > 0 and (stage == 1 or stage == 2) then
-        return (drugCfg.totalGrowMs / 2.0) * mul
+    local harvest = Grow.HarvestStage(drugCfg)
+    local growingCount = harvest - 1
+    if drugCfg.totalGrowMs and drugCfg.totalGrowMs > 0 and growingCount > 0
+        and stage >= 1 and stage <= harvest - 1 then
+        return (drugCfg.totalGrowMs / growingCount) * mul
     end
-    return (sCfg.durationMs or 0) * mul
+    return 0
 end
 
 --- 0..1 overall growth from "seed planted" to "fully grown". Sums each
 --- completed stage's duration plus the current stage's elapsed fraction.
+--- Time past `water_until` does not count — growth pauses when dry.
 local function ComputeGrowProgress(plot, drugCfg)
-    if plot.stage >= 3 then return 1.0 end
-    if plot.stage == 0 and (plot.stage_started_at or 0) == 0 then return 0.0 end
+    local harvest = Grow.HarvestStage(drugCfg)
+    if (plot.stage_started_at or 0) == 0 then return 0.0 end
+
+    -- Resolve speculatively on a local probe so the bar keeps moving
+    -- across stage transitions without waiting for the server-side
+    -- broadcast (which lags by the resolver poll interval).
+    local probe = {
+        stage            = plot.stage,
+        stage_started_at = plot.stage_started_at,
+        water_until      = plot.water_until,
+    }
+    local now = GetCloudTimeAsInt() * 1000
+    Grow.ResolveStage(probe, drugCfg, now)
+
+    if probe.stage >= harvest then return 1.0 end
 
     local total = 0
-    for s = 1, 2 do total = total + StageDurationMs(drugCfg, s) end
+    for s = 1, harvest - 1 do total = total + StageDurationMs(drugCfg, s) end
     if total <= 0 then return 1.0 end
 
     local elapsed = 0
-    for s = 1, plot.stage - 1 do elapsed = elapsed + StageDurationMs(drugCfg, s) end
-    local sinceStage = (GetCloudTimeAsInt() * 1000) - (plot.stage_started_at or 0)
-    local cap = StageDurationMs(drugCfg, plot.stage)
+    for s = 1, probe.stage - 1 do elapsed = elapsed + StageDurationMs(drugCfg, s) end
+    local effectiveNow = math.min(now, probe.water_until or 0)
+    local sinceStage = effectiveNow - (probe.stage_started_at or 0)
+    local cap = StageDurationMs(drugCfg, probe.stage)
     elapsed = elapsed + math.max(0, math.min(sinceStage, cap))
 
     return math.max(0.0, math.min(1.0, elapsed / total))
@@ -432,14 +573,14 @@ end
 ---   "ready_harvest" → stage 3 with buds remaining (text only)
 ---   "growing"       → otherwise (NUI shows the growProgress bar)
 local function ComputeStatus(plot, drugCfg)
-    if plot.stage == 0 and (plot.stage_started_at or 0) == 0 then return "ready_plant" end
-    if plot.stage == 3 then
+    if (plot.stage_started_at or 0) == 0 then return "ready_plant" end
+    local harvest = Grow.HarvestStage(drugCfg)
+    if plot.stage == harvest then
         if #Grow.RemainingBudIndexes(plot, drugCfg) > 0 then return "ready_harvest" end
         return "growing"
     end
-    local sCfg = drugCfg.stages[plot.stage]
-    local req  = (sCfg and sCfg.waterRequired) or 0
-    if (plot.water_count or 0) < req then return "needs_water" end
+    local now = GetCloudTimeAsInt() * 1000
+    if (plot.water_until or 0) <= now then return "needs_water" end
     return "growing"
 end
 
@@ -477,15 +618,15 @@ CreateThread(function()
             local onScreen, sx, sy = World3dToScreen2d(sc.x, sc.y, sc.z + 1.6)
 
             if onScreen and drugCfg then
-                local stage    = plot.stage or 0
-                local sCfg     = drugCfg.stages[stage]
-                local waterReq = (sCfg and sCfg.waterRequired) or 0
-                local water    = plot.water_count or 0
+                local nowMs    = GetCloudTimeAsInt() * 1000
                 local budsLeft = #Grow.RemainingBudIndexes(plot, drugCfg)
 
-                local growProgress = ComputeGrowProgress(plot, drugCfg)
-                local waterProgress = (waterReq > 0) and math.min(1.0, water / waterReq) or 0.0
-                local status = ComputeStatus(plot, drugCfg)
+                local growProgress  = ComputeGrowProgress(plot, drugCfg)
+                local waterProgress = Grow.WaterLevel(plot, drugCfg, nowMs)
+                local status        = ComputeStatus(plot, drugCfg)
+                -- Show the water bar whenever the plant is in a growing
+                -- stage — it's the player's reservoir gauge now.
+                local showWater = plot.stage >= 1 and plot.stage <= Grow.HarvestStage(drugCfg) - 1
 
                 SendNUIMessage({
                     action = "plotStatus",
@@ -497,8 +638,7 @@ CreateThread(function()
                         status        = status,
                         growProgress  = growProgress,
                         waterProgress = waterProgress,
-                        water         = water,
-                        waterRequired = waterReq,
+                        showWater     = showWater,
                         budsLeft      = budsLeft,
                     },
                 })
@@ -522,7 +662,10 @@ end)
 --- progress" problem without a wasteful server loop.
 CreateThread(function()
     while true do
-        Wait(5000)
+        -- Short interval keeps visual stage swaps tight on fast-tuned
+        -- drugs (e.g. totalGrowMs in seconds, not minutes). The server
+        -- only does work when the local probe actually crosses a stage.
+        Wait(1000)
         for plotId, s in pairs(PlotState) do
             if s.plot and s.plot.stage_started_at and s.plot.stage_started_at > 0 then
                 local drugCfg = Config.Drugs[s.plot.drug]
@@ -532,7 +675,7 @@ CreateThread(function()
                     local probe = {
                         stage            = s.plot.stage,
                         stage_started_at = s.plot.stage_started_at,
-                        water_count      = s.plot.water_count,
+                        water_until      = s.plot.water_until,
                     }
                     -- `os` isn't available on the FiveM client — use the
                     -- network cloud time, which matches the server's
