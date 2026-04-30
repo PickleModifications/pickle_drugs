@@ -1,0 +1,4 @@
+-- Weed-specific server glue. Empty for v1 — the generic grow/server module
+-- handles every endpoint and reads weed parameters out of Config.Drugs.weed.
+-- Drug-specific server logic (custom payouts, anti-cheat, achievements)
+-- would live here.
