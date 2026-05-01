@@ -49,13 +49,12 @@ local PLANT_CAPSULE_REST_Z = 0.5    -- metres above pot base; clears the
                                     -- rim when flipped upside-down so the
                                     -- seed can fall in.
 
---- Frames the pot AND the capsule's resting position. Aim sits between
---- the two so both stay in shot, and the camera is lifted enough above
---- the rim that the player can see down into the pot opening.
-local function CreatePlantingCam(center, heading, drugCfg)
+function GetPlantingCamPreset(spot, drugCfg)
     local potHash = joaat("pickle_pot_01")
     local pMin, pMax = GetModelDimensions(potHash)
     local fov = 38.0
+    local center  = vector3(spot.coords.x, spot.coords.y, spot.coords.z)
+    local heading = spot.coords.w or 0.0
 
     local sceneBotZ = center.z + pMin.z
     local sceneTopZ = center.z + PLANT_CAPSULE_REST_Z + 0.18
@@ -72,17 +71,24 @@ local function CreatePlantingCam(center, heading, drugCfg)
     local rad = math.rad(heading)
     local camX = center.x + math.sin(rad) * distance
     local camY = center.y - math.cos(rad) * distance
-    -- Lift the camera well above the aim point so it looks down into the
-    -- pot rim rather than across it.
     local camZ = aimZ + 1.0
 
+    return {
+        coords = vector3(camX, camY, camZ),
+        point  = vector3(center.x, center.y, aimZ),
+        fov    = fov,
+    }
+end
+
+local function CreatePlantingCam(center, heading, drugCfg)
+    local pose = GetPlantingCamPreset({ coords = vector4(center.x, center.y, center.z, heading) }, drugCfg)
     local cam = CreateCam("DEFAULT_SCRIPTED_CAMERA", true)
-    SetCamCoord(cam, camX, camY, camZ)
-    PointCamAtCoord(cam, center.x, center.y, aimZ)
-    SetCamFov(cam, fov)
+    SetCamCoord(cam, pose.coords.x, pose.coords.y, pose.coords.z)
+    PointCamAtCoord(cam, pose.point.x, pose.point.y, pose.point.z)
+    SetCamFov(cam, pose.fov)
     SetCamActive(cam, true)
     RenderScriptCams(true, false, 0, true, true)
-    return cam, fov
+    return cam, pose.fov
 end
 
 local function SpawnCapsuleTrio(drugCfg, anchor)
@@ -191,14 +197,18 @@ local function CleanupPlantingScene(skipFade)
     if PlantState.tearingDown then return end
     PlantState.tearingDown = true
 
+    local embedded = PlantState.embedded
+    local onClose  = PlantState.onClose
     local fadeMs = 400
-    if not skipFade then
+    if not skipFade and not embedded then
         DoScreenFadeOut(fadeMs)
         while not IsScreenFadedOut() do Wait(0) end
     end
 
-    RenderScriptCams(false, false, 0, true, true)
-    if PlantState.cam then DestroyCam(PlantState.cam, false) end
+    if not embedded then
+        RenderScriptCams(false, false, 0, true, true)
+        if PlantState.cam then DestroyCam(PlantState.cam, false) end
+    end
 
     local toDelete = {}
     if PlantState.capsule  then toDelete[#toDelete + 1] = PlantState.capsule end
@@ -213,18 +223,25 @@ local function CleanupPlantingScene(skipFade)
 
     if SetPlotRubbleVisible then SetPlotRubbleVisible(PlantState.plotId, true) end
 
-    SetNuiFocus(false, false)
-    SendNUIMessage({ action = "closePlanting" })
+    if not embedded then
+        SetNuiFocus(false, false)
+        SendNUIMessage({ action = "closePlanting" })
 
-    local ped = PlayerPedId()
-    FreezeEntityPosition(ped, false)
-    SetEntityVisible(ped, true, false)
-    DisplayRadar(true)
-    DisplayHud(true)
-    ClearFocus()
+        local ped = PlayerPedId()
+        FreezeEntityPosition(ped, false)
+        SetEntityVisible(ped, true, false)
+        DisplayRadar(true)
+        DisplayHud(true)
+        ClearFocus()
 
-    if not skipFade then DoScreenFadeIn(fadeMs) end
+        if not skipFade then DoScreenFadeIn(fadeMs) end
+    end
     PlantState = nil
+    if onClose then onClose() end
+end
+
+function CancelPlantingScene()
+    if PlantState then CleanupPlantingScene(true) end
 end
 
 --- Camera-basis math copied from modules/watering. Returns:
@@ -625,8 +642,11 @@ end
 
 --- Public entry. Wired into modules/grow/client's "Plant seed" target.
 ---@param plotId string
-function OpenPlantingScene(plotId)
+function OpenPlantingScene(plotId, opts)
     if PlantState then return end
+    opts = opts or {}
+    local embedded = opts.embedded == true
+
     local plot = GetPlotState(plotId)
     local spot = GetPlotSpot(plotId)
     if not plot or not spot then return end
@@ -638,17 +658,19 @@ function OpenPlantingScene(plotId)
     local heading = spot.coords.w or 0.0
     local fadeMs = 400
 
-    DoScreenFadeOut(fadeMs)
-    while not IsScreenFadedOut() do Wait(0) end
+    if not embedded then
+        DoScreenFadeOut(fadeMs)
+        while not IsScreenFadedOut() do Wait(0) end
 
-    local ped = PlayerPedId()
-    FreezeEntityPosition(ped, true)
-    SetEntityVisible(ped, false, false)
-    DisplayRadar(false)
-    DisplayHud(false)
-    SetFocusArea(center.x, center.y, center.z, 0.0, 0.0, 0.0)
+        local ped = PlayerPedId()
+        FreezeEntityPosition(ped, true)
+        SetEntityVisible(ped, false, false)
+        DisplayRadar(false)
+        DisplayHud(false)
+        SetFocusArea(center.x, center.y, center.z, 0.0, 0.0, 0.0)
+    end
 
-    local cam = CreatePlantingCam(center, heading, drugCfg)
+    local cam = embedded and opts.cam or CreatePlantingCam(center, heading, drugCfg)
     local capsule, cap, seed, capLocal = SpawnCapsuleTrio(drugCfg, vector3(center.x, center.y, center.z + 1.5))
     local capProxy = SpawnCapProxy(capsule, capLocal)
 
@@ -674,6 +696,8 @@ function OpenPlantingScene(plotId)
         held          = {},
         plotCenter    = center,
         restAnchor    = vector3(center.x, center.y, center.z + PLANT_CAPSULE_REST_Z),
+        embedded      = embedded,
+        onClose       = opts.onClose,
     }
 
     -- Park the capsule directly above the pot opening so a fully-tilted
@@ -696,10 +720,11 @@ function OpenPlantingScene(plotId)
     -- on cleanup.
     if SetPlotRubbleVisible then SetPlotRubbleVisible(plotId, false) end
 
-    SetNuiFocus(true, true)
-    SendNUIMessage({ action = "openPlanting", data = { plotId = plotId } })
-
-    DoScreenFadeIn(fadeMs)
+    if not embedded then
+        SetNuiFocus(true, true)
+        SendNUIMessage({ action = "openPlanting", data = { plotId = plotId } })
+        DoScreenFadeIn(fadeMs)
+    end
     RunPlantingThread()
 end
 

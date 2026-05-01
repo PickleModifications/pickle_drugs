@@ -6,6 +6,14 @@ Config.Debug = false
 -- plot it can find. Real entry is via ox_target on the plot itself.
 Config.Command = "growop"
 
+-- ─── Unified plant scene ───────────────────────────────────────────────────
+-- Tunable parameters for the "Interact with Plant" scene. Camera tween
+-- duration is in milliseconds; inspect orbit rate is degrees/second.
+Config.PlantScene = {
+    transitionMs            = 600,
+    inspectOrbitDegPerSec   = 12.0,
+}
+
 -- ─── Plot registry ──────────────────────────────────────────────────────────
 -- Static plot registry. Each entry seeds a row in `pickle_drugs_plots` on
 -- resource start (if missing) and gets target zones + world rendering.

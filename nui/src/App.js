@@ -1,13 +1,8 @@
 import { jsx as _jsx, jsxs as _jsxs, Fragment as _Fragment } from "react/jsx-runtime";
-import { useEffect, useRef, useState } from "react";
-import { Droplet, Leaf, Sprout } from "lucide-react";
-import { Card, CardContent } from "@/components/ui/card";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { ChevronDown, Droplet, Eye, Leaf, Mountain, Scissors, Sprout, X, } from "lucide-react";
 import { fetchNui, useNuiEvent } from "@/lib/nui";
-/**
- * Bar that rAF-lerps its visible width toward the target value, so jumpy
- * inputs (Lua bursts, percentages leaping in one tick) animate smoothly
- * instead of snapping. `target` is 0..1.
- */
+// ─── SmoothBar ────────────────────────────────────────────────────────────
 function SmoothBar({ target, className, speed = 6, }) {
     const [value, setValue] = useState(target);
     const valueRef = useRef(target);
@@ -22,65 +17,175 @@ function SmoothBar({ target, className, speed = 6, }) {
             const last = lastTsRef.current ?? ts;
             const dt = Math.min(0.05, (ts - last) / 1000);
             lastTsRef.current = ts;
-            const a = 1 - Math.exp(-speed * dt); // exponential approach
-            const next = valueRef.current + (targetRef.current - valueRef.current) * a;
-            valueRef.current = Math.abs(next - targetRef.current) < 0.0005
-                ? targetRef.current
-                : next;
+            const a = 1 - Math.exp(-speed * dt);
+            const next = valueRef.current +
+                (targetRef.current - valueRef.current) * a;
+            valueRef.current =
+                Math.abs(next - targetRef.current) < 0.0005
+                    ? targetRef.current
+                    : next;
             setValue(valueRef.current);
             raf = requestAnimationFrame(tick);
         };
         raf = requestAnimationFrame(tick);
         return () => cancelAnimationFrame(raf);
     }, [speed]);
-    return (_jsx("div", { className: "h-1.5 rounded-full bg-white/10 overflow-hidden", children: _jsx("div", { className: "h-full " + (className ?? "bg-primary"), style: { width: `${value * 100}%` } }) }));
+    return (_jsx("div", { className: "h-1.5 rounded-full bg-white/10 overflow-hidden", children: _jsx("div", { className: "h-full " + (className ?? "bg-white/70"), style: { width: `${value * 100}%` } }) }));
 }
-const TOP_BAR_LABELS = {
+// ─── Helpers ─────────────────────────────────────────────────────────────
+const STATUS_LABEL = {
     needs_soil: "Needs Soil",
     ready_plant: "Needs Seed",
-    needs_water: "Needs Water",
+    needs_water: "Needs Water — growth paused",
     ready_harvest: "Ready to Harvest",
-    growing: "Total grow progress",
+    growing: "Growing",
 };
+const STATUS_ACCENT = {
+    needs_soil: "bg-orange-500",
+    ready_plant: "bg-emerald-400",
+    needs_water: "bg-amber-400",
+    ready_harvest: "bg-fuchsia-400",
+    growing: "bg-emerald-500",
+};
+function formatEta(ms) {
+    if (ms == null)
+        return null;
+    if (ms <= 0)
+        return "ready";
+    const s = Math.ceil(ms / 1000);
+    if (s < 60)
+        return `${s}s`;
+    const m = Math.floor(s / 60);
+    const rem = s % 60;
+    return `${m}m ${rem}s`;
+}
+const ICON_MAP = {
+    mound: Mountain,
+    sprout: Sprout,
+    droplet: Droplet,
+    scissors: Scissors,
+    eye: Eye,
+};
+function ActionIcon({ name, className }) {
+    const Comp = ICON_MAP[name] ?? Sprout;
+    return _jsx(Comp, { className: className ?? "h-5 w-5" });
+}
+// Per-action tone tokens. Resting state is neutral white; `hover` previews
+// the action's color so the player can feel the affordance, and `active`
+// shipps that color when the action is currently running.
+const NEUTRAL_ENABLED = "text-white/90 bg-white/[0.06] ring-white/30 ";
+const TONES = {
+    soiling: {
+        hover: "hover:bg-orange-500/25 hover:ring-orange-400/70 hover:text-orange-50 hover:shadow-[0_0_14px_-6px_rgba(251,146,60,0.7)]",
+        active: "bg-orange-500/30 ring-orange-400/70 text-orange-50 shadow-[0_0_18px_-6px_rgba(251,146,60,0.75)]",
+    },
+    planting: {
+        hover: "hover:bg-emerald-500/25 hover:ring-emerald-400/70 hover:text-emerald-50 hover:shadow-[0_0_14px_-6px_rgba(52,211,153,0.7)]",
+        active: "bg-emerald-500/30 ring-emerald-400/70 text-emerald-50 shadow-[0_0_18px_-6px_rgba(52,211,153,0.75)]",
+    },
+    watering: {
+        hover: "hover:bg-sky-500/25 hover:ring-sky-400/70 hover:text-sky-50 hover:shadow-[0_0_14px_-6px_rgba(56,189,248,0.7)]",
+        active: "bg-sky-500/30 ring-sky-400/70 text-sky-50 shadow-[0_0_18px_-6px_rgba(56,189,248,0.75)]",
+    },
+    cutting: {
+        hover: "hover:bg-fuchsia-500/25 hover:ring-fuchsia-400/70 hover:text-fuchsia-50 hover:shadow-[0_0_14px_-6px_rgba(232,121,249,0.7)]",
+        active: "bg-fuchsia-500/30 ring-fuchsia-400/70 text-fuchsia-50 shadow-[0_0_18px_-6px_rgba(232,121,249,0.75)]",
+    },
+    inspect: {
+        hover: "hover:bg-violet-500/25 hover:ring-violet-400/70 hover:text-violet-50 hover:shadow-[0_0_14px_-6px_rgba(167,139,250,0.7)]",
+        active: "bg-violet-500/30 ring-violet-400/70 text-violet-50 shadow-[0_0_18px_-6px_rgba(167,139,250,0.75)]",
+    },
+    menu: { hover: "", active: "" },
+};
+// ─── Status section ──────────────────────────────────────────────────────
+function StatusSection({ status }) {
+    const eta = formatEta(status.etaMs);
+    const dryWarn = status.statusKey !== "needs_soil" &&
+        status.statusKey !== "ready_plant" &&
+        status.waterProgress < 0.2 &&
+        status.showWater;
+    return (_jsxs("div", { className: "px-5 py-3 flex items-center gap-5", children: [_jsxs("div", { className: "flex items-center gap-2 min-w-0", children: [_jsx("div", { className: "h-9 w-9 rounded-lg bg-emerald-500/15 ring-1 ring-emerald-500/30 flex items-center justify-center shrink-0", children: _jsx(Leaf, { className: "h-5 w-5 text-emerald-300" }) }), _jsxs("div", { className: "flex flex-col leading-tight min-w-0", children: [_jsx("span", { className: "text-sm font-medium text-white truncate", children: status.drug }), _jsxs("span", { className: "text-[10px] uppercase tracking-wider text-white/50 tabular-nums", children: ["Stage ", status.stage, " / ", status.stageMax] })] })] }), _jsxs("div", { className: "w-[280px] flex flex-col gap-1.5", children: [_jsxs("div", { className: "space-y-1 min-w-0", children: [_jsxs("div", { className: "flex items-center justify-between text-[11px]", children: [_jsx("span", { className: "text-white/60 truncate", children: STATUS_LABEL[status.statusKey] }), _jsx("span", { className: "text-white/60 tabular-nums shrink-0 ml-2", children: status.statusKey === "growing"
+                                            ? `${Math.round(status.growProgress * 100)}%`
+                                            : status.statusKey === "ready_harvest"
+                                                ? `${status.budsLeft} buds`
+                                                : "" })] }), _jsx(SmoothBar, { target: status.statusKey === "growing"
+                                    ? status.growProgress
+                                    : 1, className: STATUS_ACCENT[status.statusKey] })] }), status.showWater && (_jsxs("div", { className: "space-y-1 min-w-0", children: [_jsxs("div", { className: "flex items-center justify-between text-[11px]", children: [_jsxs("span", { className: "text-white/60 flex items-center gap-1", children: [_jsx(Droplet, { className: "h-3 w-3 text-sky-400" }), "Water"] }), _jsxs("span", { className: "text-white/60 tabular-nums", children: [Math.round(status.waterProgress * 100), "%"] })] }), _jsx(SmoothBar, { target: status.waterProgress, className: dryWarn ? "bg-red-500" : "bg-sky-400" })] })), eta && status.statusKey === "growing" && (_jsxs("div", { className: "flex items-center justify-between text-[11px] tabular-nums", children: [_jsx("span", { className: "text-white/50", children: "Next stage in" }), _jsx("span", { className: "text-white/70", children: eta })] })), dryWarn && (_jsx("div", { className: "text-[11px] text-red-300", children: "Reservoir nearly empty \u2014 growth pauses when dry." }))] })] }));
+}
+// ─── Actions section ─────────────────────────────────────────────────────
+function ActionsSection({ actions, activeAction, onSelect, onCancelAction, onClose, }) {
+    const inAction = activeAction !== "menu";
+    return (_jsxs("div", { className: "px-3 py-3 flex items-center gap-2", children: [_jsx("div", { className: "flex items-center gap-1.5", children: actions.map((a) => {
+                    const isActive = activeAction === a.id;
+                    const disabled = !a.available || (inAction && !isActive);
+                    const tone = TONES[a.id] ?? TONES.menu;
+                    return (_jsxs("button", { disabled: disabled, onClick: () => isActive ? onCancelAction() : onSelect(a.id), title: a.reason ?? a.label, className: "group relative flex flex-col items-center justify-center gap-1 rounded-lg px-3 py-2 min-w-[68px] ring-1 transition-all " +
+                            (isActive
+                                ? tone.active + " "
+                                : disabled
+                                    ? "text-white/25 cursor-not-allowed bg-white/[0.02] ring-white/20 "
+                                    : NEUTRAL_ENABLED + tone.hover + " "), children: [_jsx(ActionIcon, { name: a.icon, className: "h-5 w-5" }), _jsx("span", { className: "text-[10px] font-medium leading-none", children: a.label }), !a.available && a.reason && (_jsx("span", { className: "absolute -top-7 left-1/2 -translate-x-1/2 text-[10px] text-white/70 bg-black/80 px-2 py-0.5 rounded whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none ring-1 ring-white/10", children: a.reason }))] }, a.id));
+                }) }), _jsx("div", { className: "h-10 w-px bg-white/10 mx-1" }), inAction ? (_jsxs("button", { onClick: onCancelAction, className: "flex flex-col items-center justify-center gap-1 rounded-lg px-3 py-2 min-w-[68px] bg-amber-500/15 ring-1 ring-amber-400/50 text-amber-200 hover:bg-amber-500/25 hover:ring-amber-400/70 transition-colors", title: "Back to menu", children: [_jsx(ChevronDown, { className: "h-5 w-5 rotate-90" }), _jsx("span", { className: "text-[10px] font-medium leading-none", children: "Back" })] })) : (_jsxs("button", { onClick: onClose, className: "flex flex-col items-center justify-center gap-1 rounded-lg px-3 py-2 min-w-[68px] bg-white/[0.06] ring-1 ring-white/30 text-white/80 hover:bg-red-500/20 hover:text-red-100 hover:ring-red-400/60 transition-colors", title: "Close", children: [_jsx(X, { className: "h-5 w-5" }), _jsx("span", { className: "text-[10px] font-medium leading-none", children: "Close" })] }))] }));
+}
+// ─── Action hint ─────────────────────────────────────────────────────────
+function ActionHintInline({ activeAction }) {
+    if (activeAction === "menu") {
+        return (_jsx("span", { className: "text-[11px] text-white/50 italic", children: "Pick an action to begin" }));
+    }
+    let content = null;
+    if (activeAction === "cutting") {
+        content = (_jsxs(_Fragment, { children: ["Hold ", _jsx(Kbd, { children: "A" }), " / ", _jsx(Kbd, { children: "D" }), " to rotate \u00B7 click a bud to cut"] }));
+    }
+    else if (activeAction === "watering") {
+        content = (_jsxs(_Fragment, { children: ["Move the cursor to position the pitcher \u00B7 hold ", _jsx(Kbd, { children: "A" }), " /", " ", _jsx(Kbd, { children: "D" }), " to tilt and pour"] }));
+    }
+    else if (activeAction === "soiling") {
+        content = (_jsxs(_Fragment, { children: ["Hold left-click and drag to rip the bag \u00B7 then move it over the pot and tilt with ", _jsx(Kbd, { children: "A" }), " / ", _jsx(Kbd, { children: "D" }), " to pour"] }));
+    }
+    else if (activeAction === "planting") {
+        content = (_jsxs(_Fragment, { children: ["Click the cap to pop it \u00B7 grab the capsule and tilt with", " ", _jsx(Kbd, { children: "A" }), " / ", _jsx(Kbd, { children: "D" }), " to drop the seed \u00B7 click each rubble pile to bury"] }));
+    }
+    else if (activeAction === "inspect") {
+        content = (_jsxs(_Fragment, { children: ["Inspecting your plant \u2014 press ", _jsx(Kbd, { children: "Esc" }), " or Back to return"] }));
+    }
+    return (_jsx("span", { className: "text-[11px] text-white/80 truncate", children: content }));
+}
+function Kbd({ children }) {
+    // h-[18px] + leading-none + align-middle keeps the chip from pushing the
+    // surrounding line height — its visual size is independent of its layout
+    // contribution.
+    return (_jsx("kbd", { className: "inline-flex items-center align-middle h-[18px] px-1.5 mx-0.5 rounded bg-white/10 ring-1 ring-white/15 text-[11px] font-mono leading-none", children: children }));
+}
+// ─── Watering meters (separate floater while in watering action) ─────────
+function WateringMeters({ pitcher, plantLevel, showPlant, }) {
+    return (_jsx("div", { className: "absolute top-6 right-6 pointer-events-none", children: _jsxs("div", { className: "rounded-xl bg-black/60 ring-1 ring-white/10  px-4 py-3 w-[200px]", children: [_jsxs("div", { className: "flex items-center gap-2 mb-2", children: [_jsx(Droplet, { className: "h-4 w-4 text-sky-400" }), _jsx("span", { className: "text-xs text-white/60", children: "Pitcher" }), _jsxs("span", { className: "ml-auto text-xs tabular-nums text-white/80", children: [Math.round(pitcher * 100), "%"] })] }), _jsx(SmoothBar, { target: pitcher, className: "bg-sky-400", speed: 10 }), showPlant && (_jsxs(_Fragment, { children: [_jsxs("div", { className: "flex items-center gap-2 mt-3 mb-2", children: [_jsx(Sprout, { className: "h-4 w-4 text-emerald-400" }), _jsx("span", { className: "text-xs text-white/60", children: "Plant" }), _jsxs("span", { className: "ml-auto text-xs tabular-nums text-white/80", children: [Math.round(plantLevel * 100), "%"] })] }), _jsx(SmoothBar, { target: plantLevel, className: "bg-emerald-400" })] }))] }) }));
+}
+// ─── App ─────────────────────────────────────────────────────────────────
 function App() {
-    const [mode, setMode] = useState("idle");
-    const [heading, setHeading] = useState(0);
-    const [waterLevel, setWaterLevel] = useState(1.0);
+    const [open, setOpen] = useState(false);
+    const [status, setStatus] = useState(null);
+    const [pitcherLevel, setPitcherLevel] = useState(1.0);
     const [plantWaterLevel, setPlantWaterLevel] = useState(0.0);
     const [showPlantWater, setShowPlantWater] = useState(false);
-    const [plotStatus, setPlotStatus] = useState(null);
-    useNuiEvent("plotStatus", (data) => {
-        if (!data || !data.visible) {
-            setPlotStatus(null);
-        }
-        else {
-            setPlotStatus(data);
-        }
-    });
     const rootRef = useRef(null);
     const heldRef = useRef(new Set());
-    // ─── NUI events from Lua ───────────────────────────────────────────────
-    useNuiEvent("openCutting", (data) => {
-        setHeading(data?.plantHeading ?? 0);
-        setMode("cutting");
+    const cursorRef = useRef({ x: 0.5, y: 0.5 });
+    useNuiEvent("openPlantScene", () => {
+        setOpen(true);
         requestAnimationFrame(() => rootRef.current?.focus());
     });
-    useNuiEvent("closeCutting", () => {
-        setMode("idle");
+    useNuiEvent("closePlantScene", () => {
+        setOpen(false);
+        setStatus(null);
         heldRef.current.clear();
     });
-    useNuiEvent("openWatering", (data) => {
-        setWaterLevel(data?.level ?? 1.0);
-        setMode("watering");
-        requestAnimationFrame(() => rootRef.current?.focus());
-    });
-    useNuiEvent("closeWatering", () => {
-        setMode("idle");
-        heldRef.current.clear();
+    useNuiEvent("plantSceneStatus", (data) => {
+        if (data)
+            setStatus(data);
     });
     useNuiEvent("wateringLevel", (data) => {
         if (data?.level !== undefined)
-            setWaterLevel(data.level);
+            setPitcherLevel(data.level);
     });
     useNuiEvent("wateringPlantLevel", (data) => {
         if (data?.level !== undefined)
@@ -88,121 +193,66 @@ function App() {
         if (data?.show !== undefined)
             setShowPlantWater(data.show);
     });
-    useNuiEvent("openPlanting", () => {
-        setMode("planting");
-        requestAnimationFrame(() => rootRef.current?.focus());
-    });
-    useNuiEvent("closePlanting", () => {
-        setMode("idle");
-        heldRef.current.clear();
-    });
-    useNuiEvent("openSoiling", () => {
-        setMode("soiling");
-        requestAnimationFrame(() => rootRef.current?.focus());
-    });
-    useNuiEvent("closeSoiling", () => {
-        setMode("idle");
-        heldRef.current.clear();
-    });
     useEffect(() => {
+        if (!open)
+            return;
         rootRef.current?.focus();
-    }, []);
-    // ─── Cutting tick: forward A/D rotation + cursor stream ────────────────
+    }, [open]);
+    const activeAction = status?.activeAction ?? "menu";
     useEffect(() => {
-        if (mode !== "cutting")
+        if (!open || activeAction === "menu" || activeAction === "inspect")
             return;
-        const ROTATE_PER_TICK = 2.5;
         const tick = window.setInterval(() => {
-            if (heldRef.current.has("KeyA")) {
-                fetchNui("rotate", { delta: ROTATE_PER_TICK }).then((r) => r?.heading !== undefined && setHeading(r.heading));
+            const payload = {
+                cursorX: cursorRef.current.x,
+                cursorY: cursorRef.current.y,
+                heldKeys: [...heldRef.current],
+            };
+            if (activeAction === "cutting") {
+                if (heldRef.current.has("KeyA"))
+                    fetchNui("rotate", { delta: 2.5 });
+                if (heldRef.current.has("KeyD"))
+                    fetchNui("rotate", { delta: -2.5 });
+                fetchNui("cuttingInput", {
+                    cursorX: payload.cursorX,
+                    cursorY: payload.cursorY,
+                });
             }
-            if (heldRef.current.has("KeyD")) {
-                fetchNui("rotate", { delta: -ROTATE_PER_TICK }).then((r) => r?.heading !== undefined && setHeading(r.heading));
+            else if (activeAction === "watering") {
+                fetchNui("wateringInput", payload);
             }
-            // Stream cursor coords for the cursor-driven scissors prop.
-            fetchNui("cuttingInput", {
-                cursorX: cursorRef.current.x,
-                cursorY: cursorRef.current.y,
-            });
+            else if (activeAction === "planting") {
+                fetchNui("plantingInput", payload);
+            }
+            else if (activeAction === "soiling") {
+                fetchNui("soilingInput", payload);
+            }
         }, 16);
         return () => window.clearInterval(tick);
-    }, [mode]);
-    // ─── Watering tick: forward cursor + held keys at 60Hz ─────────────────
-    useEffect(() => {
-        if (mode !== "watering")
-            return;
-        const tick = window.setInterval(() => {
-            fetchNui("wateringInput", {
-                cursorX: cursorRef.current.x,
-                cursorY: cursorRef.current.y,
-                heldKeys: [...heldRef.current],
-            });
-        }, 16);
-        return () => window.clearInterval(tick);
-    }, [mode]);
-    // ─── Planting tick: same stream shape as watering (cursor + A/D) ──────
-    useEffect(() => {
-        if (mode !== "planting")
-            return;
-        const tick = window.setInterval(() => {
-            fetchNui("plantingInput", {
-                cursorX: cursorRef.current.x,
-                cursorY: cursorRef.current.y,
-                heldKeys: [...heldRef.current],
-            });
-        }, 16);
-        return () => window.clearInterval(tick);
-    }, [mode]);
-    // ─── Soiling tick: same stream shape (cursor + A/D) ───────────────────
-    useEffect(() => {
-        if (mode !== "soiling")
-            return;
-        const tick = window.setInterval(() => {
-            fetchNui("soilingInput", {
-                cursorX: cursorRef.current.x,
-                cursorY: cursorRef.current.y,
-                heldKeys: [...heldRef.current],
-            });
-        }, 16);
-        return () => window.clearInterval(tick);
-    }, [mode]);
-    const cursorRef = useRef({ x: 0.5, y: 0.5 });
+    }, [open, activeAction]);
+    const onSelect = (id) => fetchNui("plantSceneSelect", { action: id });
+    const onCancelAction = () => fetchNui("plantSceneCancelAction");
+    const onClose = () => fetchNui("plantSceneClose");
     const onMouseMove = (e) => {
         cursorRef.current.x = e.clientX / window.innerWidth;
         cursorRef.current.y = e.clientY / window.innerHeight;
     };
     const onKeyDown = (e) => {
         if (e.code === "Escape") {
-            if (mode === "cutting") {
-                fetchNui("close");
-                setMode("idle");
-            }
-            else if (mode === "watering") {
-                fetchNui("wateringClose");
-                setMode("idle");
-            }
-            else if (mode === "planting") {
-                fetchNui("plantingClose");
-                setMode("idle");
-            }
-            else if (mode === "soiling") {
-                fetchNui("soilingClose");
-                setMode("idle");
-            }
+            if (activeAction === "menu")
+                onClose();
+            else
+                onCancelAction();
             return;
         }
-        if (e.code === "KeyA" || e.code === "KeyD") {
+        if (e.code === "KeyA" || e.code === "KeyD")
             heldRef.current.add(e.code);
-        }
     };
     const onKeyUp = (e) => {
         heldRef.current.delete(e.code);
     };
-    // Cutting fires on click (single-shot snip). Planting needs press +
-    // release: pressing on the capsule grabs it, releasing lets go, so
-    // forward both edges with a `pressed` flag for Lua to route.
     const onClick = (e) => {
-        if (mode !== "cutting")
+        if (activeAction !== "cutting")
             return;
         const x = e.clientX / window.innerWidth;
         const y = e.clientY / window.innerHeight;
@@ -213,10 +263,10 @@ function App() {
             return;
         const x = e.clientX / window.innerWidth;
         const y = e.clientY / window.innerHeight;
-        if (mode === "planting") {
+        if (activeAction === "planting") {
             fetchNui("plantingClick", { x, y, pressed: true });
         }
-        else if (mode === "soiling") {
+        else if (activeAction === "soiling") {
             fetchNui("soilingClick", { x, y, pressed: true });
         }
     };
@@ -225,38 +275,16 @@ function App() {
             return;
         const x = e.clientX / window.innerWidth;
         const y = e.clientY / window.innerHeight;
-        if (mode === "planting") {
+        if (activeAction === "planting") {
             fetchNui("plantingClick", { x, y, pressed: false });
         }
-        else if (mode === "soiling") {
+        else if (activeAction === "soiling") {
             fetchNui("soilingClick", { x, y, pressed: false });
         }
     };
-    return (_jsxs("div", { ref: rootRef, tabIndex: 0, autoFocus: true, onKeyDown: onKeyDown, onKeyUp: onKeyUp, onClick: onClick, onMouseDown: onMouseDown, onMouseUp: onMouseUp, onMouseMove: onMouseMove, onBlur: () => requestAnimationFrame(() => rootRef.current?.focus()), className: "dark fixed inset-0 outline-none", children: [plotStatus && plotStatus.visible && plotStatus.x != null && plotStatus.y != null && (_jsx("div", { className: "absolute pointer-events-none", style: {
-                    left: `${plotStatus.x * 100}%`,
-                    top: `${plotStatus.y * 100}%`,
-                    transform: "translate(-50%, -100%)",
-                    // Smooth out the projection-frame steps from Lua's
-                    // 30Hz tick. Linear so the motion tracks the
-                    // underlying world position without easing curves.
-                    transition: "left 50ms linear, top 50ms linear",
-                    willChange: "left, top",
-                }, children: _jsx(Card, { className: "bg-black/55 border-white/10 min-w-[220px]", children: _jsxs(CardContent, { className: "py-2.5 px-3 space-y-2", children: [_jsxs("div", { className: "flex items-center gap-2", children: [_jsx(Sprout, { className: "h-4 w-4 text-primary" }), _jsx("span", { className: "text-sm font-medium", children: plotStatus.drug })] }), _jsxs("div", { className: "space-y-1", children: [_jsxs("div", { className: "flex items-center justify-between text-[11px] tabular-nums", children: [_jsx("span", { className: "text-muted-foreground", children: plotStatus.status ? TOP_BAR_LABELS[plotStatus.status] : "—" }), plotStatus.status === "growing" && (_jsxs("span", { className: "text-muted-foreground", children: [Math.round((plotStatus.growProgress ?? 0) * 100), "%"] })), plotStatus.status === "ready_harvest" && plotStatus.budsLeft !== undefined && (_jsxs("span", { className: "text-muted-foreground", children: [plotStatus.budsLeft, " buds"] }))] }), _jsx(SmoothBar, { target: plotStatus.status === "growing"
-                                            ? plotStatus.growProgress ?? 0
-                                            : plotStatus.status === "ready_harvest"
-                                                ? 1
-                                                : plotStatus.status === "needs_water"
-                                                    ? 1
-                                                    : plotStatus.status === "ready_plant"
-                                                        ? 1
-                                                        : plotStatus.status === "needs_soil"
-                                                            ? 1
-                                                            : 0, className: plotStatus.status === "needs_water"
-                                            ? "bg-amber-400"
-                                            : plotStatus.status === "ready_plant"
-                                                ? "bg-emerald-400"
-                                                : plotStatus.status === "needs_soil"
-                                                    ? "bg-orange-700"
-                                                    : "bg-primary" })] }), plotStatus.showWater && (_jsxs("div", { className: "space-y-1", children: [_jsxs("div", { className: "flex items-center justify-between text-[11px] tabular-nums", children: [_jsxs("span", { className: "text-muted-foreground flex items-center gap-1", children: [_jsx(Droplet, { className: "h-3 w-3 text-sky-400" }), "Water"] }), _jsxs("span", { className: "text-muted-foreground", children: [Math.round((plotStatus.waterProgress ?? 0) * 100), "%"] })] }), _jsx(SmoothBar, { target: plotStatus.waterProgress ?? 0, className: "bg-sky-400" })] }))] }) }) })), mode === "cutting" && (_jsx("div", { className: "absolute inset-x-0 bottom-10 flex justify-center pointer-events-none", children: _jsx(Card, { className: "w-[460px] bg-black/55 border-white/10", children: _jsxs(CardContent, { className: "flex items-center justify-between gap-4 py-3", children: [_jsxs("div", { className: "flex items-center gap-2", children: [_jsx(Leaf, { className: "h-4 w-4 text-primary" }), _jsxs("span", { className: "text-sm", children: ["Hold ", _jsx("kbd", { className: "px-1 rounded bg-muted text-xs", children: "A" }), " /", " ", _jsx("kbd", { className: "px-1 rounded bg-muted text-xs", children: "D" }), " to rotate \u00B7 click a bud to cut"] })] }), _jsxs("span", { className: "text-xs text-muted-foreground tabular-nums", children: [heading.toFixed(0), "\u00B0"] })] }) }) })), mode === "soiling" && (_jsx("div", { className: "absolute inset-x-0 bottom-10 flex justify-center pointer-events-none", children: _jsx(Card, { className: "w-[560px] bg-black/55 border-white/10", children: _jsxs(CardContent, { className: "flex items-center gap-3 py-3", children: [_jsx(Sprout, { className: "h-4 w-4 text-orange-400" }), _jsxs("span", { className: "text-sm", children: ["Hold left-click and drag to rip the bag \u00B7 then move it over the pot and tilt with", " ", _jsx("kbd", { className: "px-1 rounded bg-muted text-xs", children: "A" }), " /", " ", _jsx("kbd", { className: "px-1 rounded bg-muted text-xs", children: "D" }), " to pour \u00B7", " ", _jsx("kbd", { className: "px-1 rounded bg-muted text-xs", children: "Esc" }), " to cancel"] })] }) }) })), mode === "watering" && (_jsxs(_Fragment, { children: [_jsx("div", { className: "absolute top-6 right-6 pointer-events-none", children: _jsx(Card, { className: "bg-black/55 border-white/10 w-[180px]", children: _jsxs(CardContent, { className: "py-3 px-4", children: [_jsxs("div", { className: "flex items-center gap-2 mb-2", children: [_jsx(Droplet, { className: "h-4 w-4 text-sky-400" }), _jsx("span", { className: "text-xs text-muted-foreground", children: "Water" }), _jsxs("span", { className: "ml-auto text-xs tabular-nums", children: [Math.round(waterLevel * 100), "%"] })] }), _jsx(SmoothBar, { target: waterLevel, className: "bg-sky-400", speed: 10 })] }) }) }), _jsxs("div", { className: "absolute inset-x-0 bottom-10 flex flex-col items-center gap-3 pointer-events-none", children: [showPlantWater && (_jsx(Card, { className: "w-[280px] bg-black/55 border-white/10", children: _jsxs(CardContent, { className: "py-3 px-4", children: [_jsxs("div", { className: "flex items-center gap-2 mb-2", children: [_jsx(Sprout, { className: "h-4 w-4 text-emerald-400" }), _jsx("span", { className: "text-xs text-muted-foreground", children: "Plant Water" }), _jsxs("span", { className: "ml-auto text-xs tabular-nums", children: [Math.round(plantWaterLevel * 100), "%"] })] }), _jsx(SmoothBar, { target: plantWaterLevel, className: "bg-emerald-400" })] }) })), _jsx(Card, { className: "w-[520px] bg-black/55 border-white/10", children: _jsxs(CardContent, { className: "flex items-center gap-3 py-3", children: [_jsx(Droplet, { className: "h-4 w-4 text-sky-400" }), _jsxs("span", { className: "text-sm", children: ["Move the cursor to position the pitcher \u00B7 hold", " ", _jsx("kbd", { className: "px-1 rounded bg-muted text-xs", children: "A" }), " /", " ", _jsx("kbd", { className: "px-1 rounded bg-muted text-xs", children: "D" }), " to tilt and pour \u00B7", " ", _jsx("kbd", { className: "px-1 rounded bg-muted text-xs", children: "Esc" }), " to finish"] })] }) })] })] }))] }));
+    const actions = useMemo(() => status?.actions ?? [], [status?.actions]);
+    if (!open)
+        return null;
+    return (_jsxs("div", { ref: rootRef, tabIndex: 0, autoFocus: true, onKeyDown: onKeyDown, onKeyUp: onKeyUp, onClick: onClick, onMouseDown: onMouseDown, onMouseUp: onMouseUp, onMouseMove: onMouseMove, onBlur: () => requestAnimationFrame(() => rootRef.current?.focus()), className: "fixed inset-0 outline-none", children: [activeAction === "watering" && (_jsx(WateringMeters, { pitcher: pitcherLevel, plantLevel: plantWaterLevel, showPlant: showPlantWater })), status && (_jsxs("div", { className: "absolute left-1/2 -translate-x-1/2 bottom-4 pointer-events-auto rounded-2xl bg-black/95 ring-1 ring-white/10 shadow-2xl overflow-hidden w-fit", children: [_jsxs("div", { className: "grid grid-cols-[auto_1fr_auto] items-center gap-4 px-5 h-9 border-b border-white/5 bg-white/[0.02]", children: [_jsx("span", { className: "text-[10px] uppercase tracking-[0.18em] text-white/45 whitespace-nowrap", children: "Plant Console" }), _jsx("div", { className: "flex justify-center items-center min-w-0 px-2 h-full", children: _jsx(ActionHintInline, { activeAction: activeAction }) }), _jsx("span", { className: "w-0", "aria-hidden": true })] }), _jsxs("div", { className: "flex items-stretch divide-x divide-white/5", children: [_jsx(ActionsSection, { actions: actions, activeAction: activeAction, onSelect: onSelect, onCancelAction: onCancelAction, onClose: onClose }), _jsx(StatusSection, { status: status })] })] }))] }));
 }
 export default App;

@@ -446,73 +446,19 @@ end
 --- Builds the ox_target options for a plot. Reads the live plot snapshot
 --- on each canInteract so prompts hide/show automatically as the server
 --- broadcasts state changes.
-local function BuildTargetOptions(spot, drugCfg)
+local function BuildTargetOptions(spot, _drugCfg)
     local id = spot.id
     return {
         {
-            name  = "pickle_drugs:soil_" .. id,
-            label = "Add soil",
-            icon  = "fa-solid fa-mound",
+            name  = "pickle_drugs:interact_" .. id,
+            label = "Interact with Plant",
+            icon  = "fa-solid fa-hand",
             canInteract = function()
-                local plot = GetPlotState(id)
-                return plot and (plot.soil_added_at or 0) == 0
+                if IsPlantSceneActive and IsPlantSceneActive() then return false end
+                return GetPlotState(id) ~= nil
             end,
             onSelect = function()
-                if drugCfg.soiling and OpenSoilingScene then
-                    OpenSoilingScene(id)
-                else
-                    TriggerServerEvent("pickle_drugs:addSoil", id)
-                end
-            end,
-        },
-        {
-            name  = "pickle_drugs:plant_" .. id,
-            label = "Plant seed",
-            icon  = "fa-solid fa-seedling",
-            canInteract = function()
-                local plot = GetPlotState(id)
-                if not plot then return false end
-                if (plot.soil_added_at or 0) == 0 then return false end
-                return (plot.stage_started_at or 0) == 0
-            end,
-            onSelect = function()
-                if drugCfg.planting and OpenPlantingScene then
-                    OpenPlantingScene(id)
-                else
-                    TriggerServerEvent("pickle_drugs:plant", id)
-                end
-            end,
-        },
-        {
-            name  = "pickle_drugs:water_" .. id,
-            label = "Water plant",
-            icon  = "fa-solid fa-droplet",
-            canInteract = function()
-                local plot = GetPlotState(id)
-                if not plot then return false end
-                local harvest = Grow.HarvestStage(drugCfg)
-                if plot.stage < 1 or plot.stage > harvest then return false end
-                -- Allow watering whenever the reservoir isn't full. Topping
-                -- up is up to the player; growth pauses if it runs dry.
-                local now = GetCloudTimeAsInt() * 1000
-                return Grow.WaterLevel(plot, drugCfg, now) < 0.999
-            end,
-            onSelect = function()
-                OpenWateringScene(id)
-            end,
-        },
-        {
-            name  = "pickle_drugs:harvest_" .. id,
-            label = "Harvest buds",
-            icon  = "fa-solid fa-scissors",
-            canInteract = function()
-                local plot = GetPlotState(id)
-                if not plot then return false end
-                if plot.stage ~= Grow.HarvestStage(drugCfg) then return false end
-                return #Grow.RemainingBudIndexes(plot, drugCfg) > 0
-            end,
-            onSelect = function()
-                OpenCuttingScene(id)
+                if OpenPlantScene then OpenPlantScene(id) end
             end,
         },
     }
@@ -557,142 +503,6 @@ CreateThread(function()
             PlotState[plot.id].spot = spot
             PlotState[plot.id].plot = plot
             ApplyPlotState(spot, plot)
-        end
-    end
-end)
-
---- Returns the duration (ms) of the given stage, honouring totalGrowMs
---- distribution and Config.GrowTimeMultiplier. Mirrors the logic in
---- Grow.ResolveStage.
-local function StageDurationMs(drugCfg, stage)
-    local mul = (Config and Config.GrowTimeMultiplier) or 1.0
-    local harvest = Grow.HarvestStage(drugCfg)
-    local growingCount = harvest - 1
-    if drugCfg.totalGrowMs and drugCfg.totalGrowMs > 0 and growingCount > 0
-        and stage >= 1 and stage <= harvest - 1 then
-        return (drugCfg.totalGrowMs / growingCount) * mul
-    end
-    return 0
-end
-
---- 0..1 overall growth from "seed planted" to "fully grown". Sums each
---- completed stage's duration plus the current stage's elapsed fraction.
---- Time past `water_until` does not count — growth pauses when dry.
-local function ComputeGrowProgress(plot, drugCfg)
-    local harvest = Grow.HarvestStage(drugCfg)
-    if (plot.stage_started_at or 0) == 0 then return 0.0 end
-
-    -- Resolve speculatively on a local probe so the bar keeps moving
-    -- across stage transitions without waiting for the server-side
-    -- broadcast (which lags by the resolver poll interval).
-    local probe = {
-        stage            = plot.stage,
-        stage_started_at = plot.stage_started_at,
-        water_until      = plot.water_until,
-    }
-    local now = GetCloudTimeAsInt() * 1000
-    Grow.ResolveStage(probe, drugCfg, now)
-
-    if probe.stage >= harvest then return 1.0 end
-
-    local total = 0
-    for s = 1, harvest - 1 do total = total + StageDurationMs(drugCfg, s) end
-    if total <= 0 then return 1.0 end
-
-    local elapsed = 0
-    for s = 1, probe.stage - 1 do elapsed = elapsed + StageDurationMs(drugCfg, s) end
-    local effectiveNow = math.min(now, probe.water_until or 0)
-    local sinceStage = effectiveNow - (probe.stage_started_at or 0)
-    local cap = StageDurationMs(drugCfg, probe.stage)
-    elapsed = elapsed + math.max(0, math.min(sinceStage, cap))
-
-    return math.max(0.0, math.min(1.0, elapsed / total))
-end
-
---- Top-bar status enum used by the NUI to choose between bar/label modes:
----   "ready_plant"   → stage 0 unplanted (text only)
----   "needs_water"   → current stage's waterRequired not yet met (text only)
----   "ready_harvest" → stage 3 with buds remaining (text only)
----   "growing"       → otherwise (NUI shows the growProgress bar)
-local function ComputeStatus(plot, drugCfg)
-    if (plot.soil_added_at or 0) == 0 then return "needs_soil" end
-    if (plot.stage_started_at or 0) == 0 then return "ready_plant" end
-    local harvest = Grow.HarvestStage(drugCfg)
-    if plot.stage == harvest then
-        if #Grow.RemainingBudIndexes(plot, drugCfg) > 0 then return "ready_harvest" end
-        return "growing"
-    end
-    local now = GetCloudTimeAsInt() * 1000
-    if (plot.water_until or 0) <= now then return "needs_water" end
-    return "growing"
-end
-
---- Floating status panel. Each ~100ms, pick the closest plot to the player;
---- if it's within range, project its world position to screen coords and
---- push the snapshot to the NUI which renders an absolute-positioned card.
-CreateThread(function()
-    local STATUS_RANGE_M = 15.0
-    local lastVisible = false
-    while true do
-        -- 30Hz tick — fast enough that the projection delta between frames
-        -- is a few pixels, which the NUI's CSS transition smooths out into
-        -- continuous motion. Going to 60Hz / Wait(0) starts costing IPC
-        -- bandwidth without a visible benefit.
-        Wait(33)
-        local ped = PlayerPedId()
-        local pcoords = GetEntityCoords(ped)
-
-        local closest, closestDist
-        for _, s in pairs(PlotState) do
-            if s.spot then
-                local sc = s.spot.coords
-                local d = #(pcoords - vector3(sc.x, sc.y, sc.z))
-                if not closestDist or d < closestDist then
-                    closest = s
-                    closestDist = d
-                end
-            end
-        end
-
-        if closest and closestDist <= STATUS_RANGE_M and closest.plot then
-            local plot    = closest.plot
-            local drugCfg = Config.Drugs[plot.drug]
-            local sc      = closest.spot.coords
-            local onScreen, sx, sy = World3dToScreen2d(sc.x, sc.y, sc.z + 1.6)
-
-            if onScreen and drugCfg then
-                local nowMs    = GetCloudTimeAsInt() * 1000
-                local budsLeft = #Grow.RemainingBudIndexes(plot, drugCfg)
-
-                local growProgress  = ComputeGrowProgress(plot, drugCfg)
-                local waterProgress = Grow.WaterLevel(plot, drugCfg, nowMs)
-                local status        = ComputeStatus(plot, drugCfg)
-                -- Show the water bar whenever the plant is in a growing
-                -- stage — it's the player's reservoir gauge now.
-                local showWater = plot.stage >= 1 and plot.stage <= Grow.HarvestStage(drugCfg) - 1
-
-                SendNUIMessage({
-                    action = "plotStatus",
-                    data = {
-                        visible       = true,
-                        x             = sx,
-                        y             = sy,
-                        drug          = drugCfg.label or plot.drug,
-                        status        = status,
-                        growProgress  = growProgress,
-                        waterProgress = waterProgress,
-                        showWater     = showWater,
-                        budsLeft      = budsLeft,
-                    },
-                })
-                lastVisible = true
-            elseif lastVisible then
-                SendNUIMessage({ action = "plotStatus", data = { visible = false } })
-                lastVisible = false
-            end
-        elseif lastVisible then
-            SendNUIMessage({ action = "plotStatus", data = { visible = false } })
-            lastVisible = false
         end
     end
 end)

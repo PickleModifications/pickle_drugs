@@ -20,10 +20,12 @@ local PLANT_BAG_REST_Z   = 0.5
 
 -- ─── Camera + helpers (mirrored from planting/watering) ────────────────────
 
-local function CreateSoilingCam(center, heading, drugCfg)
+function GetSoilingCamPreset(spot, drugCfg)
     local potHash = joaat("pickle_pot_01")
     local pMin, pMax = GetModelDimensions(potHash)
     local fov = CAMERA_FOV
+    local center  = vector3(spot.coords.x, spot.coords.y, spot.coords.z)
+    local heading = spot.coords.w or 0.0
 
     local sceneBotZ = center.z + pMin.z
     local sceneTopZ = center.z + PLANT_BAG_REST_Z + 0.18
@@ -42,10 +44,19 @@ local function CreateSoilingCam(center, heading, drugCfg)
     local camY = center.y - math.cos(rad) * distance
     local camZ = aimZ + 1.0
 
+    return {
+        coords = vector3(camX, camY, camZ),
+        point  = vector3(center.x, center.y, aimZ),
+        fov    = fov,
+    }
+end
+
+local function CreateSoilingCam(center, heading, drugCfg)
+    local pose = GetSoilingCamPreset({ coords = vector4(center.x, center.y, center.z, heading) }, drugCfg)
     local cam = CreateCam("DEFAULT_SCRIPTED_CAMERA", true)
-    SetCamCoord(cam, camX, camY, camZ)
-    PointCamAtCoord(cam, center.x, center.y, aimZ)
-    SetCamFov(cam, fov)
+    SetCamCoord(cam, pose.coords.x, pose.coords.y, pose.coords.z)
+    PointCamAtCoord(cam, pose.point.x, pose.point.y, pose.point.z)
+    SetCamFov(cam, pose.fov)
     SetCamActive(cam, true)
     RenderScriptCams(true, false, 0, true, true)
     return cam
@@ -187,14 +198,18 @@ local function CleanupSoilingScene(skipFade)
     if SoilState.tearingDown then return end
     SoilState.tearingDown = true
 
+    local embedded = SoilState.embedded
+    local onClose  = SoilState.onClose
     local fadeMs = 400
-    if not skipFade then
+    if not skipFade and not embedded then
         DoScreenFadeOut(fadeMs)
         while not IsScreenFadedOut() do Wait(0) end
     end
 
-    RenderScriptCams(false, false, 0, true, true)
-    if SoilState.cam then DestroyCam(SoilState.cam, false) end
+    if not embedded then
+        RenderScriptCams(false, false, 0, true, true)
+        if SoilState.cam then DestroyCam(SoilState.cam, false) end
+    end
 
     local toDelete = {}
     if SoilState.fullBag    then toDelete[#toDelete + 1] = SoilState.fullBag end
@@ -206,18 +221,25 @@ local function CleanupSoilingScene(skipFade)
 
     if SetPlotSoilVisible then SetPlotSoilVisible(SoilState.plotId, true) end
 
-    SetNuiFocus(false, false)
-    SendNUIMessage({ action = "closeSoiling" })
+    if not embedded then
+        SetNuiFocus(false, false)
+        SendNUIMessage({ action = "closeSoiling" })
 
-    local ped = PlayerPedId()
-    FreezeEntityPosition(ped, false)
-    SetEntityVisible(ped, true, false)
-    DisplayRadar(true)
-    DisplayHud(true)
-    ClearFocus()
+        local ped = PlayerPedId()
+        FreezeEntityPosition(ped, false)
+        SetEntityVisible(ped, true, false)
+        DisplayRadar(true)
+        DisplayHud(true)
+        ClearFocus()
 
-    if not skipFade then DoScreenFadeIn(fadeMs) end
+        if not skipFade then DoScreenFadeIn(fadeMs) end
+    end
     SoilState = nil
+    if onClose then onClose() end
+end
+
+function CancelSoilingScene()
+    if SoilState then CleanupSoilingScene(true) end
 end
 
 local function FinishScene()
@@ -351,8 +373,11 @@ end
 
 -- ─── Public entry ──────────────────────────────────────────────────────────
 
-function OpenSoilingScene(plotId)
+function OpenSoilingScene(plotId, opts)
     if SoilState then return end
+    opts = opts or {}
+    local embedded = opts.embedded == true
+
     local plot = GetPlotState(plotId)
     local spot = GetPlotSpot(plotId)
     if not plot or not spot then return end
@@ -364,17 +389,19 @@ function OpenSoilingScene(plotId)
     local heading = spot.coords.w or 0.0
     local fadeMs = 400
 
-    DoScreenFadeOut(fadeMs)
-    while not IsScreenFadedOut() do Wait(0) end
+    if not embedded then
+        DoScreenFadeOut(fadeMs)
+        while not IsScreenFadedOut() do Wait(0) end
 
-    local ped = PlayerPedId()
-    FreezeEntityPosition(ped, true)
-    SetEntityVisible(ped, false, false)
-    DisplayRadar(false)
-    DisplayHud(false)
-    SetFocusArea(center.x, center.y, center.z, 0.0, 0.0, 0.0)
+        local ped = PlayerPedId()
+        FreezeEntityPosition(ped, true)
+        SetEntityVisible(ped, false, false)
+        DisplayRadar(false)
+        DisplayHud(false)
+        SetFocusArea(center.x, center.y, center.z, 0.0, 0.0, 0.0)
+    end
 
-    local cam = CreateSoilingCam(center, heading, drugCfg)
+    local cam = embedded and opts.cam or CreateSoilingCam(center, heading, drugCfg)
     local restCoords = vector3(center.x, center.y, center.z + PLANT_BAG_REST_Z)
     local fullBag, rippedBag = SpawnBagPair(drugCfg, restCoords)
 
@@ -446,12 +473,15 @@ function OpenSoilingScene(plotId)
         bagScreenBottom = bagScreenBottom,
         ripSweepMin     = nil,
         ripSweepMax     = nil,
+        embedded        = embedded,
+        onClose         = opts.onClose,
     }
 
-    SetNuiFocus(true, true)
-    SendNUIMessage({ action = "openSoiling", data = { plotId = plotId } })
-
-    DoScreenFadeIn(fadeMs)
+    if not embedded then
+        SetNuiFocus(true, true)
+        SendNUIMessage({ action = "openSoiling", data = { plotId = plotId } })
+        DoScreenFadeIn(fadeMs)
+    end
     RunSoilingThread()
 end
 

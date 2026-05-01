@@ -6,9 +6,11 @@
 
 local CuttingState = nil
 
---- Builds the camera framed around the union of the plant + bud bounding
---- boxes so the bud (which sits above the plant's bbox) is in shot.
-local function CreateCuttingCam(center, heading, drugCfg)
+--- Returns the framing pose for the cutting scene. Used both by the
+--- standalone OpenCuttingScene and by the unified plant scene's camera
+--- director (which tweens our cam from the menu pose to this pose before
+--- handing control to the cutting flow).
+function GetCuttingCamPreset(spot, drugCfg)
     local cam = drugCfg.cutting.camera or {}
     local harvest   = Grow.HarvestStage(drugCfg)
     local plantHash = joaat(drugCfg.stages[harvest].model)
@@ -24,6 +26,8 @@ local function CreateCuttingCam(center, heading, drugCfg)
         maxZ - minZ
     )
 
+    local center  = vector3(spot.coords.x, spot.coords.y, spot.coords.z)
+    local heading = spot.coords.w or 0.0
     local aimZ = center.z + (minZ + maxZ) * 0.5
     local fov = cam.fov or 35.0
     local distance = (size * 0.5) / math.tan(math.rad(fov) * 0.5) * (cam.distanceMul or 1.0)
@@ -33,10 +37,19 @@ local function CreateCuttingCam(center, heading, drugCfg)
     local camY = center.y - math.cos(rad) * distance
     local camZ = aimZ + (cam.heightOffset or 0.0)
 
+    return {
+        coords = vector3(camX, camY, camZ),
+        point  = vector3(center.x, center.y, aimZ),
+        fov    = fov,
+    }
+end
+
+local function CreateCuttingCam(center, heading, drugCfg)
+    local pose = GetCuttingCamPreset({ coords = vector4(center.x, center.y, center.z, heading) }, drugCfg)
     local camera = CreateCam("DEFAULT_SCRIPTED_CAMERA", true)
-    SetCamCoord(camera, camX, camY, camZ)
-    PointCamAtCoord(camera, center.x, center.y, aimZ)
-    SetCamFov(camera, fov)
+    SetCamCoord(camera, pose.coords.x, pose.coords.y, pose.coords.z)
+    PointCamAtCoord(camera, pose.point.x, pose.point.y, pose.point.z)
+    SetCamFov(camera, pose.fov)
     SetCamActive(camera, true)
     RenderScriptCams(true, false, 0, true, true)
     return camera
@@ -109,14 +122,18 @@ local function CleanupCuttingView(skipFade)
     if CuttingState.tearingDown then return end
     CuttingState.tearingDown = true
 
+    local embedded = CuttingState.embedded
+    local onClose  = CuttingState.onClose
     local fadeMs = (CuttingState.drugCfg and CuttingState.drugCfg.cutting and CuttingState.drugCfg.cutting.fadeMs) or 400
-    if not skipFade then
+    if not skipFade and not embedded then
         DoScreenFadeOut(fadeMs)
         while not IsScreenFadedOut() do Wait(0) end
     end
 
-    RenderScriptCams(false, false, 0, true, true)
-    if CuttingState.cam then DestroyCam(CuttingState.cam, false) end
+    if not embedded then
+        RenderScriptCams(false, false, 0, true, true)
+        if CuttingState.cam then DestroyCam(CuttingState.cam, false) end
+    end
 
     local toDelete = {}
     for _, fb in ipairs(CuttingState.fallingBuds or {}) do toDelete[#toDelete + 1] = fb end
@@ -127,22 +144,29 @@ local function CleanupCuttingView(skipFade)
         if ent and DoesEntityExist(ent) then DeleteEntity(ent) end
     end
 
-    SetNuiFocus(false, false)
-    SendNUIMessage({ action = "closeCutting" })
-    TriggerEvent("pickle_drugs:showPlots")
+    if not embedded then
+        SetNuiFocus(false, false)
+        SendNUIMessage({ action = "closeCutting" })
+        TriggerEvent("pickle_drugs:showPlots")
 
-    local ped = PlayerPedId()
-    ClearPedTasks(ped)
-    FreezeEntityPosition(ped, false)
-    SetEntityVisible(ped, true, false)
-    DisplayRadar(true)
-    DisplayHud(true)
-    ClearFocus()
+        local ped = PlayerPedId()
+        ClearPedTasks(ped)
+        FreezeEntityPosition(ped, false)
+        SetEntityVisible(ped, true, false)
+        DisplayRadar(true)
+        DisplayHud(true)
+        ClearFocus()
 
-    if not skipFade then
-        DoScreenFadeIn(fadeMs)
+        if not skipFade then
+            DoScreenFadeIn(fadeMs)
+        end
     end
     CuttingState = nil
+    if onClose then onClose() end
+end
+
+function CancelCuttingScene()
+    if CuttingState then CleanupCuttingView(true) end
 end
 
 --- Each-frame loop: keeps gameplay controls disabled, and positions the
@@ -198,8 +222,10 @@ end
 --- Public entry. Called from interactions_client when the player picks
 --- "Harvest" on a stage-3 plot.
 ---@param plotId string
-function OpenCuttingScene(plotId)
+function OpenCuttingScene(plotId, opts)
     if CuttingState then return end
+    opts = opts or {}
+    local embedded = opts.embedded == true
 
     local plot   = GetPlotState(plotId)
     local spot   = GetPlotSpot(plotId)
@@ -213,17 +239,19 @@ function OpenCuttingScene(plotId)
     local heading = spot.coords.w or 0.0
     local fadeMs  = drugCfg.cutting.fadeMs or 400
 
-    DoScreenFadeOut(fadeMs)
-    while not IsScreenFadedOut() do Wait(0) end
+    if not embedded then
+        DoScreenFadeOut(fadeMs)
+        while not IsScreenFadedOut() do Wait(0) end
 
-    local ped = PlayerPedId()
-    FreezeEntityPosition(ped, true)
-    SetEntityVisible(ped, false, false)
-    DisplayRadar(false)
-    DisplayHud(false)
-    SetFocusArea(center.x, center.y, center.z, 0.0, 0.0, 0.0)
+        local ped = PlayerPedId()
+        FreezeEntityPosition(ped, true)
+        SetEntityVisible(ped, false, false)
+        DisplayRadar(false)
+        DisplayHud(false)
+        SetFocusArea(center.x, center.y, center.z, 0.0, 0.0, 0.0)
+    end
 
-    local cam  = CreateCuttingCam(center, heading, drugCfg)
+    local cam  = embedded and opts.cam or CreateCuttingCam(center, heading, drugCfg)
     local tool = SpawnFloatingScissors(drugCfg)
 
     CuttingState = {
@@ -237,14 +265,17 @@ function OpenCuttingScene(plotId)
         fallingCarriers = {},
         cursorX         = 0.5,
         cursorY         = 0.5,
+        embedded        = embedded,
+        onClose         = opts.onClose,
     }
 
     SpawnBudProxies()
 
-    SetNuiFocus(true, true)
-    SendNUIMessage({ action = "openCutting", data = { plantHeading = heading } })
-
-    DoScreenFadeIn(fadeMs)
+    if not embedded then
+        SetNuiFocus(true, true)
+        SendNUIMessage({ action = "openCutting", data = { plantHeading = heading } })
+        DoScreenFadeIn(fadeMs)
+    end
     RunCuttingThread()
 end
 

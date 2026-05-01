@@ -53,15 +53,14 @@ local function SetLiquidLevel(pitcher, liquid, drugCfg, level01)
         false, false, false, false, 2, true)
 end
 
---- Camera framed on the plot, slightly tighter than the cutting view so
---- the soil reads clearly. Reuses the cutting camera knobs but with a
---- watering-specific distance multiplier.
-local function CreateWateringCam(center, heading, drugCfg)
+function GetWateringCamPreset(spot, drugCfg)
     local cfg = drugCfg.watering
     local potHash = joaat("pickle_pot_01")
     local pMin, pMax = GetModelDimensions(potHash)
     local size = math.max(pMax.x - pMin.x, pMax.y - pMin.y, pMax.z - pMin.z, 0.6)
     local fov  = 38.0
+    local center  = vector3(spot.coords.x, spot.coords.y, spot.coords.z)
+    local heading = spot.coords.w or 0.0
     local aimZ = center.z + (pMin.z + pMax.z) * 0.5 + 0.4
     local distance = (size * 0.5) / math.tan(math.rad(fov) * 0.5) * (cfg.cameraDistMul or 1.4)
 
@@ -70,10 +69,19 @@ local function CreateWateringCam(center, heading, drugCfg)
     local camY = center.y - math.cos(rad) * distance
     local camZ = aimZ + 0.6
 
+    return {
+        coords = vector3(camX, camY, camZ),
+        point  = vector3(center.x, center.y, aimZ),
+        fov    = fov,
+    }
+end
+
+local function CreateWateringCam(center, heading, drugCfg)
+    local pose = GetWateringCamPreset({ coords = vector4(center.x, center.y, center.z, heading) }, drugCfg)
     local cam = CreateCam("DEFAULT_SCRIPTED_CAMERA", true)
-    SetCamCoord(cam, camX, camY, camZ)
-    PointCamAtCoord(cam, center.x, center.y, aimZ)
-    SetCamFov(cam, fov)
+    SetCamCoord(cam, pose.coords.x, pose.coords.y, pose.coords.z)
+    PointCamAtCoord(cam, pose.point.x, pose.point.y, pose.point.z)
+    SetCamFov(cam, pose.fov)
     SetCamActive(cam, true)
     RenderScriptCams(true, false, 0, true, true)
     return cam
@@ -84,16 +92,16 @@ local function CleanupWateringScene(skipFade)
     if WaterState.tearingDown then return end
     WaterState.tearingDown = true
 
-    -- Flush any sub-threshold poured amount so the world-view bar
-    -- reflects what the player actually poured. Otherwise small dribbles
-    -- (less than `pourPerPlot`) are lost on close.
+    local embedded = WaterState.embedded
+    local onClose  = WaterState.onClose
+
     if WaterState.pouredOnPlot and WaterState.pouredOnPlot > 0.0 then
         TriggerServerEvent("pickle_drugs:water", WaterState.plotId, WaterState.pouredOnPlot)
         WaterState.pouredOnPlot = 0.0
     end
 
     local fadeMs = 400
-    if not skipFade then
+    if not skipFade and not embedded then
         DoScreenFadeOut(fadeMs)
         while not IsScreenFadedOut() do Wait(0) end
     end
@@ -102,26 +110,39 @@ local function CleanupWateringScene(skipFade)
         StopParticleFxLooped(WaterState.ptfx, false)
         WaterState.ptfx = nil
     end
-    RenderScriptCams(false, false, 0, true, true)
-    if WaterState.cam then DestroyCam(WaterState.cam, false) end
+    if WaterState.potPtfx then
+        StopParticleFxLooped(WaterState.potPtfx, false)
+        WaterState.potPtfx = nil
+    end
+    if not embedded then
+        RenderScriptCams(false, false, 0, true, true)
+        if WaterState.cam then DestroyCam(WaterState.cam, false) end
+    end
     if WaterState.liquid and DoesEntityExist(WaterState.liquid) then DeleteEntity(WaterState.liquid) end
     if WaterState.pitcher and DoesEntityExist(WaterState.pitcher) then DeleteEntity(WaterState.pitcher) end
 
-    SetNuiFocus(false, false)
-    SendNUIMessage({ action = "closeWatering" })
-    TriggerEvent("pickle_drugs:showPlots")
+    if not embedded then
+        SetNuiFocus(false, false)
+        SendNUIMessage({ action = "closeWatering" })
+        TriggerEvent("pickle_drugs:showPlots")
 
-    local ped = PlayerPedId()
-    FreezeEntityPosition(ped, false)
-    SetEntityVisible(ped, true, false)
-    DisplayRadar(true)
-    DisplayHud(true)
-    ClearFocus()
+        local ped = PlayerPedId()
+        FreezeEntityPosition(ped, false)
+        SetEntityVisible(ped, true, false)
+        DisplayRadar(true)
+        DisplayHud(true)
+        ClearFocus()
 
-    if not skipFade then
-        DoScreenFadeIn(fadeMs)
+        if not skipFade then
+            DoScreenFadeIn(fadeMs)
+        end
     end
     WaterState = nil
+    if onClose then onClose() end
+end
+
+function CancelWateringScene()
+    if WaterState then CleanupWateringScene(true) end
 end
 
 --- Maps NUI cursor X/Y onto the pitcher's world position with no
@@ -317,15 +338,17 @@ end
 
 --- Public entry. Called by interactions_client when "Water" is selected.
 ---@param plotId string
-function OpenWateringScene(plotId)
+function OpenWateringScene(plotId, opts)
     if WaterState then return end
+    opts = opts or {}
+    local embedded = opts.embedded == true
+
     local plot = GetPlotState(plotId)
     local spot = GetPlotSpot(plotId)
     if not plot or not spot then return end
     local drugCfg = Config.Drugs[plot.drug]
     if not drugCfg or not drugCfg.watering then return end
 
-    -- Optional gate: pitcher item required.
     if drugCfg.pitcherItem and Inventory and Inventory.GetItemCount then
         if Inventory.GetItemCount and Inventory.GetItemCount(drugCfg.pitcherItem) < 1 then
             return
@@ -336,19 +359,19 @@ function OpenWateringScene(plotId)
     local heading = spot.coords.w or 0.0
     local fadeMs = 400
 
-    DoScreenFadeOut(fadeMs)
-    while not IsScreenFadedOut() do Wait(0) end
+    if not embedded then
+        DoScreenFadeOut(fadeMs)
+        while not IsScreenFadedOut() do Wait(0) end
 
-    local ped = PlayerPedId()
-    FreezeEntityPosition(ped, true)
-    SetEntityVisible(ped, false, false)
-    DisplayRadar(false)
-    DisplayHud(false)
-    SetFocusArea(center.x, center.y, center.z, 0.0, 0.0, 0.0)
-    -- Plots stay visible during watering — the player needs to see the pot
-    -- they're pouring into. The camera frames just this plot anyway.
+        local ped = PlayerPedId()
+        FreezeEntityPosition(ped, true)
+        SetEntityVisible(ped, false, false)
+        DisplayRadar(false)
+        DisplayHud(false)
+        SetFocusArea(center.x, center.y, center.z, 0.0, 0.0, 0.0)
+    end
 
-    local cam = CreateWateringCam(center, heading, drugCfg)
+    local cam = embedded and opts.cam or CreateWateringCam(center, heading, drugCfg)
     local pitcher, liquid = SpawnPitcher(drugCfg, vector3(center.x, center.y, center.z + 1.5))
 
     -- Pitcher's anchor when cursor is centred — just above the pot rim
@@ -382,14 +405,19 @@ function OpenWateringScene(plotId)
         hasPlant         = hasPlant,
         plantLevelStart  = startLevel,
         plantLevelAdded  = 0.0,
+        embedded         = embedded,
+        onClose          = opts.onClose,
     }
 
     SetLiquidLevel(pitcher, liquid, drugCfg, 1.0)
 
-    SetNuiFocus(true, true)
-    SendNUIMessage({ action = "openWatering", data = { plotId = plotId, level = 1.0 } })
-
-    DoScreenFadeIn(fadeMs)
+    if not embedded then
+        SetNuiFocus(true, true)
+        SendNUIMessage({ action = "openWatering", data = { plotId = plotId, level = 1.0 } })
+        DoScreenFadeIn(fadeMs)
+    else
+        SendNUIMessage({ action = "wateringLevel", data = { level = 1.0 } })
+    end
     RunWateringThread()
 end
 
