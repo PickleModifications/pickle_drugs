@@ -14,21 +14,62 @@ Config.PlantScene = {
     inspectOrbitDegPerSec   = 12.0,
 }
 
--- ─── Plot registry ──────────────────────────────────────────────────────────
--- Static plot registry. Each entry seeds a row in `pickle_drugs_plots` on
--- resource start (if missing) and gets target zones + world rendering.
--- Future: dynamic placement.
-Config.GrowSpots = {
-    {
-        id     = "starter_weed",
-        drug   = "weed",
-        coords = vector4(450.4583, -1014.3433, 27.495, 26.7962),
+-- ─── NPC Employees ─────────────────────────────────────────────────────────
+-- Per-task timing for NPC workers managed via /employees.
+--   workMs        — duration of the mechanic animation per action (soil,
+--                   plant, water, harvest one bud). Server fires the
+--                   actual gameplay mutation when this expires.
+--   cooldownMs    — pause between consecutive actions while idle.
+--   walkMinMs     — floor for any goto duration (prevents teleport-feel
+--                   on very close plots).
+--   walkMaxMs     — ceiling so far-away plots don't stall the schedule.
+--   walkSpeedMps  — meters per second used to scale walk time by
+--                   distance. The local ped uses TaskGoToCoordAnyMeans
+--                   at its own speed; this number drives the deadline.
+--   mechanicAnim  — animation played during `work` tasks.
+Config.Employees = {
+    -- Animation duration per action. `default` is used for any action
+    -- that doesn't have its own override below. Action keys: "soil",
+    -- "plant", "water", "harvest". Server fires the gameplay mutation
+    -- when this expires.
+    workMs = {
+        default = 4500,
+        soil    = 4500,
+        plant   = 4500,
+        water   = 4500,
+        harvest = 1000,
     },
+    cooldownMs   = 1000,
+    walkMinMs    = 10000,
+    walkMaxMs    = 15000,
+    walkSpeedMps = 1.5,
+    -- Animation played for every NPC work action (soil / plant / water /
+    -- harvest). Scenario is left nil so the client always falls through
+    -- to the anim path — `mini@repair / fixing_a_ped` reads as a kneeling
+    -- mechanic-style fix that works for every action without needing a
+    -- prop attached to the ped's hand.
+    mechanicScenario = nil,
+    mechanicAnim = {
+        dict = "mini@repair",
+        clip = "fixing_a_ped",
+    },
+    -- Where the ped stands when working a plot, expressed in the plot's
+    -- local frame (x = right, y = forward, z = up — so the default
+    -- {0, 1, 0} stands the ped 1m in front of the pot facing it).
+    workOffset = vector3(0.0, -1.0, 0.0),
+    -- Distance (m) at which a walking ped is considered "arrived" — the
+    -- client signals the server to skip the remaining walk-min floor and
+    -- start the work animation immediately.
+    arriveDistance = 1.25,
 }
 
 -- ─── Drug definitions ───────────────────────────────────────────────────────
--- Each entry is referenced by `Config.GrowSpots[i].drug`. Modules read from
--- here:
+-- Plot LOCATIONS are no longer here — they live in `pickle_drugs_plots`
+-- and are CRUD-managed via the `/drugs` admin UI.
+--
+-- Each entry below is the static *recipe* for a drug type (models, stages,
+-- scene parameters). When an admin creates a plot they pick from this
+-- table. Modules read from here:
 --   modules/grow      → stages, capsule, soilBag (rendering + lifecycle)
 --   modules/cutting   → cutting (camera, scissors, fall behaviour)
 --   modules/watering  → watering (pitcher kinematics, particles, level)
@@ -90,7 +131,7 @@ Config.Drugs.weed = {
 
     -- Total wall-clock from "seed planted" to "fully grown". Split evenly
     -- across the pre-harvest growing stages (1..N-1).
-    totalGrowMs = 30 * 1000, -- 10 seconds total
+    totalGrowMs = 300 * 1000, -- 10 seconds total
 
     -- Water reservoir. The plant holds up to `waterCapacityMs` of growing
     -- time; it depletes by real time and growth pauses when it hits 0.

@@ -16,18 +16,25 @@ function Grow.HarvestStage(drugCfg)
 end
 
 --- Returns a fresh plot row with default values for the given spot.
----@param spot table { id, drug, coords }
+--- `spot.coords` is `{ x, y, z, w }` (or vector4); coords are persisted
+--- on the plot row directly now that there's no static spot config.
+---@param spot table { id, drug, coords = { x, y, z, w } }
 ---@return table plot
 function Grow.NewPlot(spot)
+    local c = spot.coords or {}
     return {
         id              = spot.id,
         drug            = spot.drug,
         stage           = 1,
-        soil_added_at   = 0,            -- 0 means "no soil yet" (Needs Soil state)
-        stage_started_at = 0,           -- 0 means "not planted yet"
-        water_until     = 0,            -- ms epoch; growth only progresses up to this point
-        cut_buds        = {},           -- array of bud-slot indexes already cut at the harvest stage
+        soil_added_at   = 0,
+        stage_started_at = 0,
+        water_until     = 0,
+        cut_buds        = {},
         updated_at      = 0,
+        coords_x        = tonumber(c.x) or 0,
+        coords_y        = tonumber(c.y) or 0,
+        coords_z        = tonumber(c.z) or 0,
+        coords_w        = tonumber(c.w) or 0,
     }
 end
 
@@ -167,4 +174,90 @@ function Grow.RemainingBudIndexes(plot, drugCfg)
         if not cut[i] then remaining[#remaining + 1] = i end
     end
     return remaining
+end
+
+-- ─── Pure lifecycle mutators ─────────────────────────────────────────────
+-- Server-only, but live in shared so the employee scheduler can call them
+-- without depending on grow/server.lua's local scope. Each returns
+-- `ok, reason` and mutates the plot table in place. The caller is
+-- responsible for persisting + broadcasting (via Grow.SyncServerPlot).
+
+function Grow.PerformAddSoil(plot, nowMs)
+    if not plot then return false, "no_plot" end
+    if (plot.soil_added_at or 0) ~= 0 then return false, "already_soiled" end
+    plot.soil_added_at = nowMs
+    return true
+end
+
+function Grow.PerformPlant(plot, drugCfg, nowMs)
+    if not plot then return false, "no_plot" end
+    if (plot.soil_added_at or 0) == 0 then return false, "needs_soil" end
+    if (plot.stage_started_at or 0) ~= 0 then return false, "already_planted" end
+    if not drugCfg then return false, "no_drug_cfg" end
+    plot.stage            = 1
+    plot.stage_started_at = nowMs
+    plot.water_until      = 0
+    plot.cut_buds         = {}
+    return true
+end
+
+function Grow.PerformWater(plot, drugCfg, nowMs, fraction)
+    if not plot or not drugCfg then return false, "no_plot" end
+    local harvest = Grow.HarvestStage(drugCfg)
+    if (plot.stage or 0) < 1 or plot.stage > harvest then return false, "wrong_stage" end
+    local default = (drugCfg.watering and drugCfg.watering.pourPerPlot) or 0.20
+    local f = tonumber(fraction) or default
+    if f <= 0 then return false, "no_fraction" end
+    if f > default then f = default end
+    Grow.AddWater(plot, drugCfg, nowMs, f)
+    return true
+end
+
+--- Cuts a single bud. Returns ok, reason. If the cut empties the plot,
+--- ResetPlot is invoked here (matching the existing event behaviour).
+function Grow.PerformCutBud(plot, drugCfg, budIndex)
+    if not plot or not drugCfg then return false, "no_plot" end
+    local harvest = Grow.HarvestStage(drugCfg)
+    if plot.stage ~= harvest then return false, "wrong_stage" end
+    local s3 = drugCfg.stages[harvest]
+    if not s3 or not s3.buds or not s3.buds.offsets then return false, "no_buds" end
+    budIndex = tonumber(budIndex)
+    if not budIndex or budIndex < 1 or budIndex > #s3.buds.offsets then
+        return false, "bad_index"
+    end
+    for _, idx in ipairs(plot.cut_buds or {}) do
+        if idx == budIndex then return false, "already_cut" end
+    end
+    plot.cut_buds[#plot.cut_buds + 1] = budIndex
+    if #plot.cut_buds >= #s3.buds.offsets then
+        Grow.ResetPlot(plot)
+    end
+    return true
+end
+
+--- Decides what an NPC employee should do next at the given plot, given
+--- the resolved state. Returns one of:
+---   "soil"                    — needs soil
+---   "plant"                   — soiled but no seed
+---   "water"                   — growing and reservoir under threshold
+---   "harvest", budIndex       — at harvest stage with at least one bud left
+---   nil                       — nothing actionable (growing & watered, or
+---                                stage past the work range)
+--- Threshold: NPC tops up if WaterLevel < 0.5 so plots don't run dry
+--- between visits, but doesn't constantly micro-pour.
+function Grow.NextEmployeeAction(plot, drugCfg, nowMs)
+    if not plot or not drugCfg then return nil end
+    if (plot.soil_added_at or 0) == 0 then return "soil" end
+    if (plot.stage_started_at or 0) == 0 then return "plant" end
+    local harvest = Grow.HarvestStage(drugCfg)
+    if plot.stage == harvest then
+        local remaining = Grow.RemainingBudIndexes(plot, drugCfg)
+        if #remaining > 0 then return "harvest", remaining[1] end
+        return nil
+    end
+    if plot.stage >= 1 and plot.stage < harvest then
+        local water = Grow.WaterLevel(plot, drugCfg, nowMs)
+        if water < 0.5 then return "water" end
+    end
+    return nil
 end

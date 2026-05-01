@@ -2,6 +2,10 @@ import { jsx as _jsx, jsxs as _jsxs, Fragment as _Fragment } from "react/jsx-run
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, Droplet, Eye, Leaf, Mountain, Scissors, Sprout, X, } from "lucide-react";
 import { fetchNui, useNuiEvent } from "@/lib/nui";
+import { CreatorPanel } from "./CreatorPanel";
+import { EmployeesPanel } from "./EmployeesPanel";
+import { AssignerPanel } from "./AssignerPanel";
+import { EmployeeInfoPanel } from "./EmployeeInfoPanel";
 // ─── SmoothBar ────────────────────────────────────────────────────────────
 function SmoothBar({ target, className, speed = 6, }) {
     const [value, setValue] = useState(target);
@@ -150,6 +154,9 @@ function ActionHintInline({ activeAction }) {
     }
     return (_jsx("span", { className: "text-[11px] text-white/80 truncate", children: content }));
 }
+function GizmoHelpBar({ frozen, enableCancel, }) {
+    return (_jsx("div", { className: "fixed inset-x-0 bottom-6 flex justify-center pointer-events-none", children: _jsxs("div", { className: "rounded-2xl bg-black/85 ring-1 ring-white/15 shadow-2xl px-4 py-2.5 flex items-center gap-3 text-[12px] text-white/85", children: [_jsx("span", { className: "text-[10px] uppercase tracking-[0.18em] text-white/45", children: "Placement" }), _jsx("span", { className: "h-4 w-px bg-white/10" }), _jsxs("span", { className: "flex items-center gap-1.5", children: [_jsx(Kbd, { children: "G" }), frozen ? "Unfreeze" : "Freeze"] }), frozen && (_jsxs(_Fragment, { children: [_jsxs("span", { className: "flex items-center gap-1.5", children: [_jsx(Kbd, { children: "W" }), _jsx(Kbd, { children: "A" }), _jsx(Kbd, { children: "S" }), _jsx(Kbd, { children: "D" }), "Move"] }), _jsxs("span", { className: "flex items-center gap-1.5", children: [_jsx(Kbd, { children: "A" }), _jsx(Kbd, { children: "D" }), "Rotate"] }), _jsxs("span", { className: "flex items-center gap-1.5", children: [_jsx(Kbd, { children: "Shift" }), "Faster"] })] })), _jsxs("span", { className: "flex items-center gap-1.5", children: [_jsx(Kbd, { children: "E" }), _jsx("span", { className: "text-emerald-200/90", children: "Save" })] }), enableCancel && (_jsxs("span", { className: "flex items-center gap-1.5", children: [_jsx(Kbd, { children: "Esc" }), _jsx("span", { className: "text-red-200/90", children: "Cancel" })] }))] }) }));
+}
 function Kbd({ children }) {
     // h-[18px] + leading-none + align-middle keeps the chip from pushing the
     // surrounding line height — its visual size is independent of its layout
@@ -164,6 +171,22 @@ function WateringMeters({ pitcher, plantLevel, showPlant, }) {
 function App() {
     const [open, setOpen] = useState(false);
     const [status, setStatus] = useState(null);
+    const [creatorOpen, setCreatorOpen] = useState(false);
+    const [creatorDrugs, setCreatorDrugs] = useState([]);
+    const [creatorPlots, setCreatorPlots] = useState([]);
+    const [creatorHidden, setCreatorHidden] = useState(false);
+    const [gizmoHelp, setGizmoHelp] = useState(null);
+    // Employees roster surface
+    const [employeesOpen, setEmployeesOpen] = useState(false);
+    const [employeesHidden, setEmployeesHidden] = useState(false);
+    const [employeesModels, setEmployeesModels] = useState([]);
+    const [employeesList, setEmployeesList] = useState([]);
+    // Plot assigner surface
+    const [assignerOpen, setAssignerOpen] = useState(false);
+    const [assignerData, setAssignerData] = useState(null);
+    // Employee info popup
+    const [empInfoOpen, setEmpInfoOpen] = useState(false);
+    const [empInfoData, setEmpInfoData] = useState(null);
     const [pitcherLevel, setPitcherLevel] = useState(1.0);
     const [plantWaterLevel, setPlantWaterLevel] = useState(0.0);
     const [showPlantWater, setShowPlantWater] = useState(false);
@@ -173,6 +196,75 @@ function App() {
     useNuiEvent("openPlantScene", () => {
         setOpen(true);
         requestAnimationFrame(() => rootRef.current?.focus());
+    });
+    useNuiEvent("openCreator", (data) => {
+        setCreatorDrugs(data?.drugs ?? []);
+        setCreatorPlots(data?.plots ?? []);
+        setCreatorHidden(false);
+        setCreatorOpen(true);
+    });
+    useNuiEvent("closeCreator", () => setCreatorOpen(false));
+    useNuiEvent("creatorPlots", (data) => {
+        if (data?.plots)
+            setCreatorPlots(data.plots);
+    });
+    useNuiEvent("creatorMinimize", () => setCreatorHidden(true));
+    useNuiEvent("creatorRestore", (data) => {
+        setCreatorHidden(false);
+        if (data?.plots)
+            setCreatorPlots(data.plots);
+    });
+    useNuiEvent("gizmoHelp", (data) => {
+        if (!data || !data.visible) {
+            setGizmoHelp(null);
+        }
+        else {
+            setGizmoHelp({
+                visible: true,
+                frozen: !!data.frozen,
+                enableCancel: !!data.enableCancel,
+            });
+        }
+    });
+    // Employees roster
+    useNuiEvent("openEmployees", (data) => {
+        setEmployeesModels(data?.models ?? []);
+        setEmployeesList(data?.employees ?? []);
+        setEmployeesHidden(false);
+        setEmployeesOpen(true);
+    });
+    useNuiEvent("closeEmployees", () => setEmployeesOpen(false));
+    useNuiEvent("employeesList", (data) => {
+        if (data?.employees)
+            setEmployeesList(data.employees);
+    });
+    useNuiEvent("employeesMinimize", () => setEmployeesHidden(true));
+    useNuiEvent("employeesRestore", (data) => {
+        setEmployeesHidden(false);
+        if (data?.employees)
+            setEmployeesList(data.employees);
+    });
+    // Assigner
+    useNuiEvent("openAssigner", (data) => {
+        if (!data)
+            return;
+        setAssignerData(data);
+        setAssignerOpen(true);
+    });
+    useNuiEvent("closeAssigner", () => {
+        setAssignerOpen(false);
+        setAssignerData(null);
+    });
+    // Employee info popup
+    useNuiEvent("openEmployeeInfo", (data) => {
+        if (!data?.employee)
+            return;
+        setEmpInfoData(data.employee);
+        setEmpInfoOpen(true);
+    });
+    useNuiEvent("closeEmployeeInfo", () => {
+        setEmpInfoOpen(false);
+        setEmpInfoData(null);
     });
     useNuiEvent("closePlantScene", () => {
         setOpen(false);
@@ -283,8 +375,29 @@ function App() {
         }
     };
     const actions = useMemo(() => status?.actions ?? [], [status?.actions]);
-    if (!open)
+    const anyOpen = open ||
+        creatorOpen ||
+        employeesOpen ||
+        assignerOpen ||
+        empInfoOpen ||
+        !!gizmoHelp;
+    if (!anyOpen)
         return null;
+    if (creatorOpen && !open) {
+        return (_jsxs(_Fragment, { children: [_jsx(CreatorPanel, { drugs: creatorDrugs, plots: creatorPlots, hidden: creatorHidden, onClose: () => fetchNui("creatorClose") }), gizmoHelp && _jsx(GizmoHelpBar, { ...gizmoHelp })] }));
+    }
+    if (employeesOpen && !open) {
+        return (_jsxs(_Fragment, { children: [_jsx(EmployeesPanel, { models: employeesModels, employees: employeesList, hidden: employeesHidden, onClose: () => fetchNui("employeesClose") }), gizmoHelp && _jsx(GizmoHelpBar, { ...gizmoHelp })] }));
+    }
+    if (assignerOpen && assignerData && !open) {
+        return (_jsx(AssignerPanel, { empId: assignerData.empId, firstName: assignerData.firstName, lastName: assignerData.lastName, plots: assignerData.plots, initiallyAssigned: assignerData.assignedPlots, onClose: () => fetchNui("assignerClose") }));
+    }
+    if (empInfoOpen && empInfoData && !open) {
+        return (_jsx(EmployeeInfoPanel, { employee: empInfoData, onClose: () => fetchNui("employeeInfoClose") }));
+    }
+    if (!open && gizmoHelp) {
+        return _jsx(GizmoHelpBar, { ...gizmoHelp });
+    }
     return (_jsxs("div", { ref: rootRef, tabIndex: 0, autoFocus: true, onKeyDown: onKeyDown, onKeyUp: onKeyUp, onClick: onClick, onMouseDown: onMouseDown, onMouseUp: onMouseUp, onMouseMove: onMouseMove, onBlur: () => requestAnimationFrame(() => rootRef.current?.focus()), className: "fixed inset-0 outline-none", children: [activeAction === "watering" && (_jsx(WateringMeters, { pitcher: pitcherLevel, plantLevel: plantWaterLevel, showPlant: showPlantWater })), status && (_jsxs("div", { className: "absolute left-1/2 -translate-x-1/2 bottom-4 pointer-events-auto rounded-2xl bg-black/95 ring-1 ring-white/10 shadow-2xl overflow-hidden w-fit", children: [_jsxs("div", { className: "grid grid-cols-[auto_1fr_auto] items-center gap-4 px-5 h-9 border-b border-white/5 bg-white/[0.02]", children: [_jsx("span", { className: "text-[10px] uppercase tracking-[0.18em] text-white/45 whitespace-nowrap", children: "Plant Console" }), _jsx("div", { className: "flex justify-center items-center min-w-0 px-2 h-full", children: _jsx(ActionHintInline, { activeAction: activeAction }) }), _jsx("span", { className: "w-0", "aria-hidden": true })] }), _jsxs("div", { className: "flex items-stretch divide-x divide-white/5", children: [_jsx(ActionsSection, { actions: actions, activeAction: activeAction, onSelect: onSelect, onCancelAction: onCancelAction, onClose: onClose }), _jsx(StatusSection, { status: status })] })] }))] }));
 }
 export default App;

@@ -60,8 +60,9 @@ local function DespawnPlot(plotId)
 end
 
 --- Sets visibility + collision on all of a plot's entities. Used by cutting
---- / watering scenes to hide the world copy while their camera scenes run.
-local function SetPlotVisible(plotId, visible)
+--- / watering scenes to hide the world copy while their camera scenes run,
+--- and by the plot creator to hide the live prop while the admin moves it.
+function SetPlotVisible(plotId, visible)
     local s = PlotState[plotId]
     if not s or not s.entities then return end
     for ent in eachEntity(s.entities) do
@@ -388,20 +389,49 @@ end)
 
 -- ─── Sync ───────────────────────────────────────────────────────────────────
 
-local function FindSpot(plotId)
-    for _, spot in ipairs(Config.GrowSpots or {}) do
-        if spot.id == plotId then return spot end
-    end
+--- Synthesises a spot table from the plot row. Coords now live on the
+--- plot itself (DB-backed); downstream consumers (BuildTargetOptions,
+--- ApplyPlotState, SetPlotVisible, etc) still expect a spot-shaped
+--- `{ id, drug, coords = vector4(...) }` so we wrap the row.
+local function SpotFromPlot(plot)
+    if not plot or not plot.id then return nil end
+    local x = tonumber(plot.coords_x)
+    local y = tonumber(plot.coords_y)
+    local z = tonumber(plot.coords_z)
+    if not x or not y or not z then return nil end
+    return {
+        id     = plot.id,
+        drug   = plot.drug,
+        coords = vector4(x, y, z, tonumber(plot.coords_w) or 0.0),
+    }
 end
 
 RegisterNetEvent("pickle_drugs:plotUpdate", function(plot)
     if not plot or not plot.id then return end
-    local spot = FindSpot(plot.id)
+    local spot = SpotFromPlot(plot)
     if not spot then return end
+    -- If coords changed (admin moved the plot), tear down the old prop
+    -- set so syncBaseProps spawns fresh at the new location instead of
+    -- moving a pot+soil that's mid-render.
+    local existing = PlotState[plot.id]
+    if existing and existing.spot then
+        local oldC, newC = existing.spot.coords, spot.coords
+        local moved = math.abs(oldC.x - newC.x) > 0.01
+            or math.abs(oldC.y - newC.y) > 0.01
+            or math.abs(oldC.z - newC.z) > 0.01
+            or math.abs((oldC.w or 0) - (newC.w or 0)) > 0.01
+        if moved then DespawnPlot(plot.id) end
+    end
     PlotState[plot.id] = PlotState[plot.id] or {}
     PlotState[plot.id].spot = spot
     PlotState[plot.id].plot = plot
     ApplyPlotState(spot, plot)
+end)
+
+RegisterNetEvent("pickle_drugs:plotRemoved", function(plotId)
+    if not plotId then return end
+    DespawnPlot(plotId)
+    PlotState[plotId] = nil
 end)
 
 --- Polls IsModelInCdimage for every model the configured drugs reference, up
@@ -494,7 +524,7 @@ CreateThread(function()
     WaitForAllDrugModels()
     local plots = lib.callback.await("pickle_drugs:getPlots", false) or {}
     for _, plot in ipairs(plots) do
-        local spot = FindSpot(plot.id)
+        local spot = SpotFromPlot(plot)
         if spot then
             -- Preserve any entity refs already set up by a prior plotUpdate
             -- broadcast — replacing the table here would leak the previously

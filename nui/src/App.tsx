@@ -11,6 +11,10 @@ import {
 } from "lucide-react";
 
 import { fetchNui, useNuiEvent } from "@/lib/nui";
+import { CreatorPanel, type DrugOption, type PlotRow } from "./CreatorPanel";
+import { EmployeesPanel, type EmployeeRow } from "./EmployeesPanel";
+import { AssignerPanel, type AssignerPlot } from "./AssignerPanel";
+import { EmployeeInfoPanel } from "./EmployeeInfoPanel";
 
 // ─── Types ────────────────────────────────────────────────────────────────
 
@@ -404,6 +408,59 @@ function ActionHintInline({ activeAction }: { activeAction: ActionId }) {
     );
 }
 
+function GizmoHelpBar({
+    frozen,
+    enableCancel,
+}: {
+    frozen: boolean;
+    enableCancel: boolean;
+}) {
+    return (
+        <div className="fixed inset-x-0 bottom-6 flex justify-center pointer-events-none">
+            <div className="rounded-2xl bg-black/85 ring-1 ring-white/15 shadow-2xl px-4 py-2.5 flex items-center gap-3 text-[12px] text-white/85">
+                <span className="text-[10px] uppercase tracking-[0.18em] text-white/45">
+                    Placement
+                </span>
+                <span className="h-4 w-px bg-white/10" />
+                <span className="flex items-center gap-1.5">
+                    <Kbd>G</Kbd>
+                    {frozen ? "Unfreeze" : "Freeze"}
+                </span>
+                {frozen && (
+                    <>
+                        <span className="flex items-center gap-1.5">
+                            <Kbd>W</Kbd>
+                            <Kbd>A</Kbd>
+                            <Kbd>S</Kbd>
+                            <Kbd>D</Kbd>
+                            Move
+                        </span>
+                        <span className="flex items-center gap-1.5">
+                            <Kbd>A</Kbd>
+                            <Kbd>D</Kbd>
+                            Rotate
+                        </span>
+                        <span className="flex items-center gap-1.5">
+                            <Kbd>Shift</Kbd>
+                            Faster
+                        </span>
+                    </>
+                )}
+                <span className="flex items-center gap-1.5">
+                    <Kbd>E</Kbd>
+                    <span className="text-emerald-200/90">Save</span>
+                </span>
+                {enableCancel && (
+                    <span className="flex items-center gap-1.5">
+                        <Kbd>Esc</Kbd>
+                        <span className="text-red-200/90">Cancel</span>
+                    </span>
+                )}
+            </div>
+        </div>
+    );
+}
+
 function Kbd({ children }: { children: React.ReactNode }) {
     // h-[18px] + leading-none + align-middle keeps the chip from pushing the
     // surrounding line height — its visual size is independent of its layout
@@ -462,6 +519,35 @@ function WateringMeters({
 function App() {
     const [open, setOpen] = useState(false);
     const [status, setStatus] = useState<SceneStatus | null>(null);
+    const [creatorOpen, setCreatorOpen] = useState(false);
+    const [creatorDrugs, setCreatorDrugs] = useState<DrugOption[]>([]);
+    const [creatorPlots, setCreatorPlots] = useState<PlotRow[]>([]);
+    const [creatorHidden, setCreatorHidden] = useState(false);
+    const [gizmoHelp, setGizmoHelp] = useState<{
+        visible: boolean;
+        frozen: boolean;
+        enableCancel: boolean;
+    } | null>(null);
+
+    // Employees roster surface
+    const [employeesOpen, setEmployeesOpen] = useState(false);
+    const [employeesHidden, setEmployeesHidden] = useState(false);
+    const [employeesModels, setEmployeesModels] = useState<string[]>([]);
+    const [employeesList, setEmployeesList] = useState<EmployeeRow[]>([]);
+
+    // Plot assigner surface
+    const [assignerOpen, setAssignerOpen] = useState(false);
+    const [assignerData, setAssignerData] = useState<{
+        empId: string;
+        firstName: string;
+        lastName: string;
+        plots: AssignerPlot[];
+        assignedPlots: string[];
+    } | null>(null);
+
+    // Employee info popup
+    const [empInfoOpen, setEmpInfoOpen] = useState(false);
+    const [empInfoData, setEmpInfoData] = useState<EmployeeRow | null>(null);
 
     const [pitcherLevel, setPitcherLevel] = useState(1.0);
     const [plantWaterLevel, setPlantWaterLevel] = useState(0.0);
@@ -474,6 +560,81 @@ function App() {
     useNuiEvent<{ plotId: string; drug: string }>("openPlantScene", () => {
         setOpen(true);
         requestAnimationFrame(() => rootRef.current?.focus());
+    });
+
+    useNuiEvent<{ drugs?: DrugOption[]; plots?: PlotRow[] }>("openCreator", (data) => {
+        setCreatorDrugs(data?.drugs ?? []);
+        setCreatorPlots(data?.plots ?? []);
+        setCreatorHidden(false);
+        setCreatorOpen(true);
+    });
+    useNuiEvent<void>("closeCreator", () => setCreatorOpen(false));
+    useNuiEvent<{ plots?: PlotRow[] }>("creatorPlots", (data) => {
+        if (data?.plots) setCreatorPlots(data.plots);
+    });
+    useNuiEvent<void>("creatorMinimize", () => setCreatorHidden(true));
+    useNuiEvent<{ plots?: PlotRow[] }>("creatorRestore", (data) => {
+        setCreatorHidden(false);
+        if (data?.plots) setCreatorPlots(data.plots);
+    });
+    useNuiEvent<{ visible: boolean; frozen?: boolean; enableCancel?: boolean }>(
+        "gizmoHelp",
+        (data) => {
+            if (!data || !data.visible) {
+                setGizmoHelp(null);
+            } else {
+                setGizmoHelp({
+                    visible: true,
+                    frozen: !!data.frozen,
+                    enableCancel: !!data.enableCancel,
+                });
+            }
+        },
+    );
+
+    // Employees roster
+    useNuiEvent<{ models?: string[]; employees?: EmployeeRow[] }>("openEmployees", (data) => {
+        setEmployeesModels(data?.models ?? []);
+        setEmployeesList(data?.employees ?? []);
+        setEmployeesHidden(false);
+        setEmployeesOpen(true);
+    });
+    useNuiEvent<void>("closeEmployees", () => setEmployeesOpen(false));
+    useNuiEvent<{ employees?: EmployeeRow[] }>("employeesList", (data) => {
+        if (data?.employees) setEmployeesList(data.employees);
+    });
+    useNuiEvent<void>("employeesMinimize", () => setEmployeesHidden(true));
+    useNuiEvent<{ employees?: EmployeeRow[] }>("employeesRestore", (data) => {
+        setEmployeesHidden(false);
+        if (data?.employees) setEmployeesList(data.employees);
+    });
+
+    // Assigner
+    useNuiEvent<{
+        empId: string;
+        firstName: string;
+        lastName: string;
+        plots: AssignerPlot[];
+        assignedPlots: string[];
+    }>("openAssigner", (data) => {
+        if (!data) return;
+        setAssignerData(data);
+        setAssignerOpen(true);
+    });
+    useNuiEvent<void>("closeAssigner", () => {
+        setAssignerOpen(false);
+        setAssignerData(null);
+    });
+
+    // Employee info popup
+    useNuiEvent<{ employee: EmployeeRow }>("openEmployeeInfo", (data) => {
+        if (!data?.employee) return;
+        setEmpInfoData(data.employee);
+        setEmpInfoOpen(true);
+    });
+    useNuiEvent<void>("closeEmployeeInfo", () => {
+        setEmpInfoOpen(false);
+        setEmpInfoData(null);
     });
     useNuiEvent<void>("closePlantScene", () => {
         setOpen(false);
@@ -580,7 +741,68 @@ function App() {
         [status?.actions],
     );
 
-    if (!open) return null;
+    const anyOpen =
+        open ||
+        creatorOpen ||
+        employeesOpen ||
+        assignerOpen ||
+        empInfoOpen ||
+        !!gizmoHelp;
+    if (!anyOpen) return null;
+
+    if (creatorOpen && !open) {
+        return (
+            <>
+                <CreatorPanel
+                    drugs={creatorDrugs}
+                    plots={creatorPlots}
+                    hidden={creatorHidden}
+                    onClose={() => fetchNui("creatorClose")}
+                />
+                {gizmoHelp && <GizmoHelpBar {...gizmoHelp} />}
+            </>
+        );
+    }
+
+    if (employeesOpen && !open) {
+        return (
+            <>
+                <EmployeesPanel
+                    models={employeesModels}
+                    employees={employeesList}
+                    hidden={employeesHidden}
+                    onClose={() => fetchNui("employeesClose")}
+                />
+                {gizmoHelp && <GizmoHelpBar {...gizmoHelp} />}
+            </>
+        );
+    }
+
+    if (assignerOpen && assignerData && !open) {
+        return (
+            <AssignerPanel
+                empId={assignerData.empId}
+                firstName={assignerData.firstName}
+                lastName={assignerData.lastName}
+                plots={assignerData.plots}
+                initiallyAssigned={assignerData.assignedPlots}
+                onClose={() => fetchNui("assignerClose")}
+            />
+        );
+    }
+
+    if (empInfoOpen && empInfoData && !open) {
+        return (
+            <EmployeeInfoPanel
+                employee={empInfoData}
+                onClose={() => fetchNui("employeeInfoClose")}
+            />
+        );
+    }
+
+    if (!open && gizmoHelp) {
+        return <GizmoHelpBar {...gizmoHelp} />;
+    }
 
     return (
         <div

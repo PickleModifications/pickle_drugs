@@ -1,0 +1,60 @@
+if GetResourceState('qb-core') ~= 'started' or GetResourceState('qbx_core') == 'started' then return end
+
+QBCore = exports['qb-core']:GetCoreObject()
+
+function ShowNotification(text)
+	QBCore.Functions.Notify(text)
+end
+
+function CanAccessGroup(data)
+    if not data then return true end
+    local pdata = QBCore.Functions.GetPlayerData()
+    for k,v in pairs(data) do 
+        if (pdata.job.name == k and pdata.job.grade.level >= v) then return true end
+    end
+    return false
+end 
+
+function GetPlayersInArea(coords, radius)
+    local coords = coords or GetEntityCoords(PlayerPedId())
+    local radius = radius or 3.0
+    local list = QBCore.Functions.GetPlayersFromCoords(coords, radius)
+    local players = {}
+    for _, player in pairs(list) do
+        if player ~= PlayerId() then
+            players[#players + 1] = player
+        end
+    end
+    return players
+end
+
+RegisterNetEvent(GetCurrentResourceName()..":showNotification", function(text)
+    ShowNotification(text)
+end)
+
+RegisterNetEvent('QBCore:Client:OnPlayerLoaded', function()
+    TriggerServerEvent("pickle_dealerships:initializePlayer")
+end)
+
+-- Inventory Fallback
+
+CreateThread(function()
+    Wait(100)
+    
+    if InitializeInventory then return InitializeInventory() end -- Already loaded through inventory folder.
+
+    Inventory = {}
+
+    Inventory.Items = {}
+    
+    Inventory.Ready = false
+    
+    RegisterNetEvent("pickle_dealerships:setupInventory", function(data)
+        Inventory.Items = data.items
+        Inventory.Ready = true
+    end)
+    
+    RegisterNetEvent("pickle_dealerships:updateInventory", function(inventory) 
+        -- RefreshInventory(inventory)
+    end)
+end)

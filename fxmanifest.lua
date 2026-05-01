@@ -14,6 +14,7 @@ shared_scripts {
 client_scripts {
     "bridge/**/client.lua",
     "core/client.lua",
+    "modules/plant_creator/gizmo.lua",
     "modules/**/client.lua",
 }
 
