@@ -80,27 +80,12 @@ local function spawnPed(emp)
     SetModelAsNoLongerNeeded(hash)
     if not ped or not DoesEntityExist(ped) then return nil end
     SetEntityInvincible(ped, true)
-    SetEntityProofs(ped, true, true, true, true, true, true, true, true)
-    SetEntityCanBeDamaged(ped, false)
     SetBlockingOfNonTemporaryEvents(ped, true)
-    SetPedFleeAttributes(ped, 0, false)
-    SetPedCombatAttributes(ped, 46, true)
-    SetPedDiesWhenInjured(ped, false)
-    SetPedDropsWeaponsWhenDead(ped, false)
-    -- Anti-bump / anti-punch: ragdoll is blocked outright (impact +
-    -- collision + script triggers) and the event table is dampened so
-    -- a melee hit / shove can't queue a flinch task over the work anim.
-    SetPedCanRagdoll(ped, false)
-    SetPedCanRagdollFromPlayerImpact(ped, false)
-    SetPedRagdollOnCollision(ped, false)
-    SetRagdollBlockingFlags(ped, 1 | 2 | 4 | 16 | 4096) -- bullet/vehicle/fire/melee/script
-    DisablePedPainAudio(ped, true)
-    SetPedConfigFlag(ped, 17,  true)  -- BlockNonTemporaryEvents (belt-and-braces)
-    SetPedConfigFlag(ped, 281, true)  -- DisablePedAvoidance
-    SetPedConfigFlag(ped, 100, true)  -- DontInfluenceWantedLevel
-    SetPedConfigFlag(ped, 128, true)  -- DisableMelee response
-    SetPedSuffersCriticalHits(ped, false)
-    SetPedAlertness(ped, 0)
+    SetPedDefaultComponentVariation(ped)
+    -- Initial pose is idle: freeze so a player walking into them can't
+    -- nudge them out of position. Goto/return tasks unfreeze; idle/work
+    -- re-freeze (handled in applyTask).
+    FreezeEntityPosition(ped, true)
     -- Start parked-in-place; the first task broadcast will override.
     TaskStartScenarioInPlace(ped, "WORLD_HUMAN_GUARD_STAND", 0, true)
     attachTarget(ped, emp.id)
@@ -179,7 +164,7 @@ local function scheduleArrivalTp(empId, target, deadline)
         entry.tpTimer = nil
         if not entry.ped or not DoesEntityExist(entry.ped) then return end
         if distance(entry.ped, target) > 1.5 then
-            SetEntityCoordsNoOffset(entry.ped, target.x, target.y, target.z, false, false, false)
+            SetEntityCoords(entry.ped, target.x, target.y, target.z, false, false, false, false)
         end
     end)
 end
@@ -199,6 +184,7 @@ local function applyTask(empId, task)
 
     if task.kind == "goto" or task.kind == "return" then
         clearPedTasks(ped)
+        FreezeEntityPosition(ped, false)
         local t = task.target or {}
         entry.gotoOrigin = GetEntityCoords(ped)
         TaskGoToCoordAnyMeans(ped, t.x or 0.0, t.y or 0.0, t.z or 0.0, 1.3, 0, false, 786603, 0xbf800000)
@@ -228,16 +214,13 @@ local function applyTask(empId, task)
             return
         end
         clearPedTasks(ped)
+        FreezeEntityPosition(ped, false) -- briefly off so the snap+heading apply
         local t = task.target or {}
         if t.x then
-            -- Ensure the ped is exactly on the work spot before the anim
-            -- starts. Use the plot's stored z directly — a ground raycast
-            -- here hits the top of the plot pot prop and ends up placing
-            -- the ped a metre above ground.
             -- Always snap to the exact work spot so the anim plays at
             -- the configured offset from the plot (not wherever the
             -- nav-mesh dropped the ped).
-            SetEntityCoordsNoOffset(ped, t.x, t.y, t.z, false, false, false)
+            SetEntityCoords(ped, t.x, t.y, t.z, false, false, false, false)
             if t.facing then
                 SetEntityHeading(ped, t.facing)
             end
@@ -249,8 +232,10 @@ local function applyTask(empId, task)
                 TaskPlayAnim(ped, task.anim.dict, task.anim.clip, 8.0, -8.0, -1, 1, 0, false, false, false)
             end
         end
+        FreezeEntityPosition(ped, true) -- pin in place for the work animation
     elseif task.kind == "idle" then
         clearPedTasks(ped)
+        FreezeEntityPosition(ped, false) -- briefly off so a relocation can apply
         TaskStartScenarioInPlace(ped, "WORLD_HUMAN_GUARD_STAND", 0, true)
         if task.target and entry.ped then
             -- Make sure idle peds are exactly at home (they may have been
@@ -258,10 +243,11 @@ local function applyTask(empId, task)
             local d = distance(ped, task.target)
             if d > 2.5 then
                 local gz = snapToGround(task.target.x, task.target.y, task.target.z)
-                SetEntityCoordsNoOffset(ped, task.target.x, task.target.y, gz, false, false, false)
+                SetEntityCoords(ped, task.target.x, task.target.y, gz, false, false, false, false)
                 if task.target.w then SetEntityHeading(ped, task.target.w) end
             end
         end
+        FreezeEntityPosition(ped, true) -- pin home so players can't shove them off-spot
     end
 end
 
@@ -288,7 +274,7 @@ RegisterNetEvent("pickle_drugs:employeeUpdate", function(emp)
             local moved = math.abs(p.x - emp.home_x) > 0.5 or math.abs(p.y - emp.home_y) > 0.5
             if moved and entry.currentTask and entry.currentTask.kind == "idle" then
                 local gz = snapToGround(emp.home_x, emp.home_y, emp.home_z)
-                SetEntityCoordsNoOffset(entry.ped, emp.home_x, emp.home_y, gz, false, false, false)
+                SetEntityCoords(entry.ped, emp.home_x, emp.home_y, gz, false, false, false, false)
                 SetEntityHeading(entry.ped, emp.home_w or 0.0)
             end
         end
