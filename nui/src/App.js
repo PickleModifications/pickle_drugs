@@ -36,7 +36,8 @@ function SmoothBar({ target, className, speed = 6, }) {
     return (_jsx("div", { className: "h-1.5 rounded-full bg-white/10 overflow-hidden", children: _jsx("div", { className: "h-full " + (className ?? "bg-primary"), style: { width: `${value * 100}%` } }) }));
 }
 const TOP_BAR_LABELS = {
-    ready_plant: "Ready to Plant",
+    needs_soil: "Needs Soil",
+    ready_plant: "Needs Seed",
     needs_water: "Needs Water",
     ready_harvest: "Ready to Harvest",
     growing: "Total grow progress",
@@ -95,6 +96,14 @@ function App() {
         setMode("idle");
         heldRef.current.clear();
     });
+    useNuiEvent("openSoiling", () => {
+        setMode("soiling");
+        requestAnimationFrame(() => rootRef.current?.focus());
+    });
+    useNuiEvent("closeSoiling", () => {
+        setMode("idle");
+        heldRef.current.clear();
+    });
     useEffect(() => {
         rootRef.current?.focus();
     }, []);
@@ -144,6 +153,19 @@ function App() {
         }, 16);
         return () => window.clearInterval(tick);
     }, [mode]);
+    // ─── Soiling tick: same stream shape (cursor + A/D) ───────────────────
+    useEffect(() => {
+        if (mode !== "soiling")
+            return;
+        const tick = window.setInterval(() => {
+            fetchNui("soilingInput", {
+                cursorX: cursorRef.current.x,
+                cursorY: cursorRef.current.y,
+                heldKeys: [...heldRef.current],
+            });
+        }, 16);
+        return () => window.clearInterval(tick);
+    }, [mode]);
     const cursorRef = useRef({ x: 0.5, y: 0.5 });
     const onMouseMove = (e) => {
         cursorRef.current.x = e.clientX / window.innerWidth;
@@ -161,6 +183,10 @@ function App() {
             }
             else if (mode === "planting") {
                 fetchNui("plantingClose");
+                setMode("idle");
+            }
+            else if (mode === "soiling") {
+                fetchNui("soilingClose");
                 setMode("idle");
             }
             return;
@@ -183,18 +209,28 @@ function App() {
         fetchNui("clickAt", { x, y });
     };
     const onMouseDown = (e) => {
-        if (mode !== "planting" || e.button !== 0)
+        if (e.button !== 0)
             return;
         const x = e.clientX / window.innerWidth;
         const y = e.clientY / window.innerHeight;
-        fetchNui("plantingClick", { x, y, pressed: true });
+        if (mode === "planting") {
+            fetchNui("plantingClick", { x, y, pressed: true });
+        }
+        else if (mode === "soiling") {
+            fetchNui("soilingClick", { x, y, pressed: true });
+        }
     };
     const onMouseUp = (e) => {
-        if (mode !== "planting" || e.button !== 0)
+        if (e.button !== 0)
             return;
         const x = e.clientX / window.innerWidth;
         const y = e.clientY / window.innerHeight;
-        fetchNui("plantingClick", { x, y, pressed: false });
+        if (mode === "planting") {
+            fetchNui("plantingClick", { x, y, pressed: false });
+        }
+        else if (mode === "soiling") {
+            fetchNui("soilingClick", { x, y, pressed: false });
+        }
     };
     return (_jsxs("div", { ref: rootRef, tabIndex: 0, autoFocus: true, onKeyDown: onKeyDown, onKeyUp: onKeyUp, onClick: onClick, onMouseDown: onMouseDown, onMouseUp: onMouseUp, onMouseMove: onMouseMove, onBlur: () => requestAnimationFrame(() => rootRef.current?.focus()), className: "dark fixed inset-0 outline-none", children: [plotStatus && plotStatus.visible && plotStatus.x != null && plotStatus.y != null && (_jsx("div", { className: "absolute pointer-events-none", style: {
                     left: `${plotStatus.x * 100}%`,
@@ -213,10 +249,14 @@ function App() {
                                                     ? 1
                                                     : plotStatus.status === "ready_plant"
                                                         ? 1
-                                                        : 0, className: plotStatus.status === "needs_water"
+                                                        : plotStatus.status === "needs_soil"
+                                                            ? 1
+                                                            : 0, className: plotStatus.status === "needs_water"
                                             ? "bg-amber-400"
                                             : plotStatus.status === "ready_plant"
                                                 ? "bg-emerald-400"
-                                                : "bg-primary" })] }), plotStatus.showWater && (_jsxs("div", { className: "space-y-1", children: [_jsxs("div", { className: "flex items-center justify-between text-[11px] tabular-nums", children: [_jsxs("span", { className: "text-muted-foreground flex items-center gap-1", children: [_jsx(Droplet, { className: "h-3 w-3 text-sky-400" }), "Water"] }), _jsxs("span", { className: "text-muted-foreground", children: [Math.round((plotStatus.waterProgress ?? 0) * 100), "%"] })] }), _jsx(SmoothBar, { target: plotStatus.waterProgress ?? 0, className: "bg-sky-400" })] }))] }) }) })), mode === "cutting" && (_jsx("div", { className: "absolute inset-x-0 bottom-10 flex justify-center pointer-events-none", children: _jsx(Card, { className: "w-[460px] bg-black/55 border-white/10", children: _jsxs(CardContent, { className: "flex items-center justify-between gap-4 py-3", children: [_jsxs("div", { className: "flex items-center gap-2", children: [_jsx(Leaf, { className: "h-4 w-4 text-primary" }), _jsxs("span", { className: "text-sm", children: ["Hold ", _jsx("kbd", { className: "px-1 rounded bg-muted text-xs", children: "A" }), " /", " ", _jsx("kbd", { className: "px-1 rounded bg-muted text-xs", children: "D" }), " to rotate \u00B7 click a bud to cut"] })] }), _jsxs("span", { className: "text-xs text-muted-foreground tabular-nums", children: [heading.toFixed(0), "\u00B0"] })] }) }) })), mode === "watering" && (_jsxs(_Fragment, { children: [_jsx("div", { className: "absolute top-6 right-6 pointer-events-none", children: _jsx(Card, { className: "bg-black/55 border-white/10 w-[180px]", children: _jsxs(CardContent, { className: "py-3 px-4", children: [_jsxs("div", { className: "flex items-center gap-2 mb-2", children: [_jsx(Droplet, { className: "h-4 w-4 text-sky-400" }), _jsx("span", { className: "text-xs text-muted-foreground", children: "Water" }), _jsxs("span", { className: "ml-auto text-xs tabular-nums", children: [Math.round(waterLevel * 100), "%"] })] }), _jsx(SmoothBar, { target: waterLevel, className: "bg-sky-400", speed: 10 })] }) }) }), _jsxs("div", { className: "absolute inset-x-0 bottom-10 flex flex-col items-center gap-3 pointer-events-none", children: [showPlantWater && (_jsx(Card, { className: "w-[280px] bg-black/55 border-white/10", children: _jsxs(CardContent, { className: "py-3 px-4", children: [_jsxs("div", { className: "flex items-center gap-2 mb-2", children: [_jsx(Sprout, { className: "h-4 w-4 text-emerald-400" }), _jsx("span", { className: "text-xs text-muted-foreground", children: "Plant Water" }), _jsxs("span", { className: "ml-auto text-xs tabular-nums", children: [Math.round(plantWaterLevel * 100), "%"] })] }), _jsx(SmoothBar, { target: plantWaterLevel, className: "bg-emerald-400" })] }) })), _jsx(Card, { className: "w-[520px] bg-black/55 border-white/10", children: _jsxs(CardContent, { className: "flex items-center gap-3 py-3", children: [_jsx(Droplet, { className: "h-4 w-4 text-sky-400" }), _jsxs("span", { className: "text-sm", children: ["Move the cursor to position the pitcher \u00B7 hold", " ", _jsx("kbd", { className: "px-1 rounded bg-muted text-xs", children: "A" }), " /", " ", _jsx("kbd", { className: "px-1 rounded bg-muted text-xs", children: "D" }), " to tilt and pour \u00B7", " ", _jsx("kbd", { className: "px-1 rounded bg-muted text-xs", children: "Esc" }), " to finish"] })] }) })] })] }))] }));
+                                                : plotStatus.status === "needs_soil"
+                                                    ? "bg-orange-700"
+                                                    : "bg-primary" })] }), plotStatus.showWater && (_jsxs("div", { className: "space-y-1", children: [_jsxs("div", { className: "flex items-center justify-between text-[11px] tabular-nums", children: [_jsxs("span", { className: "text-muted-foreground flex items-center gap-1", children: [_jsx(Droplet, { className: "h-3 w-3 text-sky-400" }), "Water"] }), _jsxs("span", { className: "text-muted-foreground", children: [Math.round((plotStatus.waterProgress ?? 0) * 100), "%"] })] }), _jsx(SmoothBar, { target: plotStatus.waterProgress ?? 0, className: "bg-sky-400" })] }))] }) }) })), mode === "cutting" && (_jsx("div", { className: "absolute inset-x-0 bottom-10 flex justify-center pointer-events-none", children: _jsx(Card, { className: "w-[460px] bg-black/55 border-white/10", children: _jsxs(CardContent, { className: "flex items-center justify-between gap-4 py-3", children: [_jsxs("div", { className: "flex items-center gap-2", children: [_jsx(Leaf, { className: "h-4 w-4 text-primary" }), _jsxs("span", { className: "text-sm", children: ["Hold ", _jsx("kbd", { className: "px-1 rounded bg-muted text-xs", children: "A" }), " /", " ", _jsx("kbd", { className: "px-1 rounded bg-muted text-xs", children: "D" }), " to rotate \u00B7 click a bud to cut"] })] }), _jsxs("span", { className: "text-xs text-muted-foreground tabular-nums", children: [heading.toFixed(0), "\u00B0"] })] }) }) })), mode === "soiling" && (_jsx("div", { className: "absolute inset-x-0 bottom-10 flex justify-center pointer-events-none", children: _jsx(Card, { className: "w-[560px] bg-black/55 border-white/10", children: _jsxs(CardContent, { className: "flex items-center gap-3 py-3", children: [_jsx(Sprout, { className: "h-4 w-4 text-orange-400" }), _jsxs("span", { className: "text-sm", children: ["Hold left-click and drag to rip the bag \u00B7 then move it over the pot and tilt with", " ", _jsx("kbd", { className: "px-1 rounded bg-muted text-xs", children: "A" }), " /", " ", _jsx("kbd", { className: "px-1 rounded bg-muted text-xs", children: "D" }), " to pour \u00B7", " ", _jsx("kbd", { className: "px-1 rounded bg-muted text-xs", children: "Esc" }), " to cancel"] })] }) }) })), mode === "watering" && (_jsxs(_Fragment, { children: [_jsx("div", { className: "absolute top-6 right-6 pointer-events-none", children: _jsx(Card, { className: "bg-black/55 border-white/10 w-[180px]", children: _jsxs(CardContent, { className: "py-3 px-4", children: [_jsxs("div", { className: "flex items-center gap-2 mb-2", children: [_jsx(Droplet, { className: "h-4 w-4 text-sky-400" }), _jsx("span", { className: "text-xs text-muted-foreground", children: "Water" }), _jsxs("span", { className: "ml-auto text-xs tabular-nums", children: [Math.round(waterLevel * 100), "%"] })] }), _jsx(SmoothBar, { target: waterLevel, className: "bg-sky-400", speed: 10 })] }) }) }), _jsxs("div", { className: "absolute inset-x-0 bottom-10 flex flex-col items-center gap-3 pointer-events-none", children: [showPlantWater && (_jsx(Card, { className: "w-[280px] bg-black/55 border-white/10", children: _jsxs(CardContent, { className: "py-3 px-4", children: [_jsxs("div", { className: "flex items-center gap-2 mb-2", children: [_jsx(Sprout, { className: "h-4 w-4 text-emerald-400" }), _jsx("span", { className: "text-xs text-muted-foreground", children: "Plant Water" }), _jsxs("span", { className: "ml-auto text-xs tabular-nums", children: [Math.round(plantWaterLevel * 100), "%"] })] }), _jsx(SmoothBar, { target: plantWaterLevel, className: "bg-emerald-400" })] }) })), _jsx(Card, { className: "w-[520px] bg-black/55 border-white/10", children: _jsxs(CardContent, { className: "flex items-center gap-3 py-3", children: [_jsx(Droplet, { className: "h-4 w-4 text-sky-400" }), _jsxs("span", { className: "text-sm", children: ["Move the cursor to position the pitcher \u00B7 hold", " ", _jsx("kbd", { className: "px-1 rounded bg-muted text-xs", children: "A" }), " /", " ", _jsx("kbd", { className: "px-1 rounded bg-muted text-xs", children: "D" }), " to tilt and pour \u00B7", " ", _jsx("kbd", { className: "px-1 rounded bg-muted text-xs", children: "Esc" }), " to finish"] })] }) })] })] }))] }));
 }
 export default App;

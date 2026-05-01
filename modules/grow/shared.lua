@@ -23,6 +23,7 @@ function Grow.NewPlot(spot)
         id              = spot.id,
         drug            = spot.drug,
         stage           = 1,
+        soil_added_at   = 0,            -- 0 means "no soil yet" (Needs Soil state)
         stage_started_at = 0,           -- 0 means "not planted yet"
         water_until     = 0,            -- ms epoch; growth only progresses up to this point
         cut_buds        = {},           -- array of bud-slot indexes already cut at the harvest stage
@@ -143,6 +144,7 @@ end
 ---@param plot table
 function Grow.ResetPlot(plot)
     plot.stage = 1
+    plot.soil_added_at = 0
     plot.stage_started_at = 0
     plot.water_until = 0
     plot.cut_buds = {}

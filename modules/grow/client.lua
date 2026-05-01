@@ -72,14 +72,22 @@ local function SetPlotVisible(plotId, visible)
     end
 end
 
---- Ensures pot + soil exist. They never change across stages so we spawn
---- them once and leave them alone for the lifetime of the plot.
-local function syncBaseProps(s, center, heading)
+--- Ensures pot exists; soil only spawns once the player has added it.
+--- The pot is permanent for the lifetime of the plot. The soil prop is
+--- gated on `soil_added_at > 0` — pre-soil plots show an empty pot, and
+--- a post-harvest reset (Grow.ResetPlot clears soil_added_at) despawns it.
+local function syncBaseProps(s, plot, center, heading)
     if not s.entities.pot or not DoesEntityExist(s.entities.pot) then
         s.entities.pot = SpawnWorldProp("pickle_pot_01", center, heading)
     end
-    if not s.entities.soil or not DoesEntityExist(s.entities.soil) then
+
+    local needSoil = (plot.soil_added_at or 0) > 0
+    local haveSoil = s.entities.soil and DoesEntityExist(s.entities.soil)
+    if needSoil and not haveSoil then
         s.entities.soil = SpawnWorldProp("pickle_soil_01", center, heading)
+    elseif not needSoil and haveSoil then
+        DeleteEntity(s.entities.soil)
+        s.entities.soil = nil
     end
 end
 
@@ -277,7 +285,7 @@ local function ApplyPlotState(spot, plot)
         local center  = vector3(curSpot.coords.x, curSpot.coords.y, curSpot.coords.z)
         local heading = curSpot.coords.w or 0.0
 
-        syncBaseProps(s, center, heading)
+        syncBaseProps(s, curPlot, center, heading)
         syncCapsule(s, curPlot, drugCfg, center, heading)
         syncPlant(s, curPlot, drugCfg, center, heading)
         syncBuds(s, curPlot, drugCfg, center, heading)
@@ -338,6 +346,19 @@ end
 function GetPlotPotEntity(plotId)
     local s = PlotState[plotId]
     return s and s.entities and s.entities.pot or nil
+end
+
+--- Toggles visibility on the persistent soil prop. The soiling scene
+--- uses this to hide it during the pour animation (the scene renders its
+--- own soil entity that lerps Z as the bag empties) and re-show it when
+--- the scene tears down.
+function SetPlotSoilVisible(plotId, visible)
+    local s = PlotState[plotId]
+    if not s or not s.entities then return end
+    local e = s.entities.soil
+    if e and DoesEntityExist(e) then
+        SetEntityVisible(e, visible, false)
+    end
 end
 
 --- Toggles visibility on the persistent rubble pile. The planting scene
@@ -401,6 +422,9 @@ local function WaitForAllDrugModels()
         if drugCfg.planting and drugCfg.planting.rubble then
             add(drugCfg.planting.rubble)
         end
+        if drugCfg.soilBag then
+            add(drugCfg.soilBag.full); add(drugCfg.soilBag.ripped)
+        end
         for _, stage in pairs(drugCfg.stages or {}) do
             add(stage.model)
             if stage.buds then add(stage.buds.model) end
@@ -426,12 +450,30 @@ local function BuildTargetOptions(spot, drugCfg)
     local id = spot.id
     return {
         {
+            name  = "pickle_drugs:soil_" .. id,
+            label = "Add soil",
+            icon  = "fa-solid fa-mound",
+            canInteract = function()
+                local plot = GetPlotState(id)
+                return plot and (plot.soil_added_at or 0) == 0
+            end,
+            onSelect = function()
+                if drugCfg.soiling and OpenSoilingScene then
+                    OpenSoilingScene(id)
+                else
+                    TriggerServerEvent("pickle_drugs:addSoil", id)
+                end
+            end,
+        },
+        {
             name  = "pickle_drugs:plant_" .. id,
             label = "Plant seed",
             icon  = "fa-solid fa-seedling",
             canInteract = function()
                 local plot = GetPlotState(id)
-                return plot and (plot.stage_started_at or 0) == 0
+                if not plot then return false end
+                if (plot.soil_added_at or 0) == 0 then return false end
+                return (plot.stage_started_at or 0) == 0
             end,
             onSelect = function()
                 if drugCfg.planting and OpenPlantingScene then
@@ -573,6 +615,7 @@ end
 ---   "ready_harvest" → stage 3 with buds remaining (text only)
 ---   "growing"       → otherwise (NUI shows the growProgress bar)
 local function ComputeStatus(plot, drugCfg)
+    if (plot.soil_added_at or 0) == 0 then return "needs_soil" end
     if (plot.stage_started_at or 0) == 0 then return "ready_plant" end
     local harvest = Grow.HarvestStage(drugCfg)
     if plot.stage == harvest then

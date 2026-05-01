@@ -27,11 +27,20 @@ local function LoadPlots()
             -- Legacy rows used 0-indexed stages; bump to 1-indexed.
             local stage = tonumber(row.stage) or 0
             if stage < 1 then stage = 1 end
+            local soilAddedAt = tonumber(row.soil_added_at) or 0
+            local stageStartedAt = tonumber(row.stage_started_at) or 0
+            -- Pre-soil migration: rows that already had a planted seed
+            -- predate the soil step; backfill so they don't regress to
+            -- "Needs Soil" and lose growth state.
+            if soilAddedAt == 0 and stageStartedAt > 0 then
+                soilAddedAt = stageStartedAt
+            end
             Plots[spot.id] = {
                 id              = row.id,
                 drug            = row.drug,
                 stage           = stage,
-                stage_started_at = tonumber(row.stage_started_at) or 0,
+                soil_added_at   = soilAddedAt,
+                stage_started_at = stageStartedAt,
                 water_until     = tonumber(row.water_until) or 0,
                 cut_buds        = cutBuds or {},
                 updated_at      = tonumber(row.updated_at) or 0,
@@ -39,8 +48,8 @@ local function LoadPlots()
         else
             Plots[spot.id] = Grow.NewPlot(spot)
             MySQL.insert.await(
-                "INSERT INTO pickle_drugs_plots (id, drug, stage, stage_started_at, water_until, cut_buds, updated_at) VALUES (?,?,?,?,?,?,?)",
-                { spot.id, spot.drug, 1, 0, 0, "[]", now() }
+                "INSERT INTO pickle_drugs_plots (id, drug, stage, soil_added_at, stage_started_at, water_until, cut_buds, updated_at) VALUES (?,?,?,?,?,?,?,?)",
+                { spot.id, spot.drug, 1, 0, 0, 0, "[]", now() }
             )
         end
     end
@@ -52,9 +61,10 @@ end
 local function PersistPlot(plot)
     plot.updated_at = now()
     MySQL.update.await(
-        "UPDATE pickle_drugs_plots SET stage=?, stage_started_at=?, water_until=?, cut_buds=?, updated_at=? WHERE id=?",
+        "UPDATE pickle_drugs_plots SET stage=?, soil_added_at=?, stage_started_at=?, water_until=?, cut_buds=?, updated_at=? WHERE id=?",
         {
             plot.stage,
+            plot.soil_added_at or 0,
             plot.stage_started_at,
             plot.water_until,
             json.encode(plot.cut_buds or {}),
@@ -92,12 +102,29 @@ local function notify(src, msg, type_)
     TriggerClientEvent("ox_lib:notify", src, { title = "Drugs", description = msg, type = type_ or "inform" })
 end
 
+--- Add soil to an empty pot. Sets soil_added_at, which gates the plant
+--- step and flips the world view from "empty pot" to "pot + soil".
+RegisterNetEvent("pickle_drugs:addSoil", function(plotId)
+    local src = source
+    local plot = Plots[plotId]
+    if not plot then notify(src, "Plot not found", "error") return end
+    if (plot.soil_added_at or 0) ~= 0 then
+        notify(src, "Soil already added", "error") return
+    end
+    plot.soil_added_at = now()
+    SyncPlot(plot, true)
+    notify(src, "Soil added", "success")
+end)
+
 --- Plant a seed. Consumes the drug's seedItem; sets the plot's
 --- stage_started_at, which kicks the lazy stage resolver into motion.
 RegisterNetEvent("pickle_drugs:plant", function(plotId)
     local src = source
     local plot = Plots[plotId]
     if not plot then notify(src, "Plot not found", "error") return end
+    if (plot.soil_added_at or 0) == 0 then
+        notify(src, "Add soil first", "error") return
+    end
     if plot.stage_started_at ~= 0 then
         notify(src, "Already planted", "error") return
     end
@@ -218,6 +245,7 @@ CreateThread(function()
                         id              VARCHAR(64)  PRIMARY KEY,
                         drug            VARCHAR(32)  NOT NULL,
                         stage           TINYINT      NOT NULL DEFAULT 0,
+                        soil_added_at   BIGINT       NOT NULL DEFAULT 0,
                         stage_started_at BIGINT      NOT NULL DEFAULT 0,
                         water_until     BIGINT       NOT NULL DEFAULT 0,
                         cut_buds        TEXT         NOT NULL,
@@ -226,13 +254,20 @@ CreateThread(function()
                 ]])
                 -- Migrate from the old water_count column if upgrading.
                 local cols = MySQL.query.await(
-                    "SHOW COLUMNS FROM pickle_drugs_plots WHERE Field IN ('water_count','water_until')"
+                    "SHOW COLUMNS FROM pickle_drugs_plots WHERE Field IN ('water_count','water_until','soil_added_at')"
                 ) or {}
                 local has = {}
                 for _, c in ipairs(cols) do has[c.Field] = true end
                 if has.water_count and not has.water_until then
                     MySQL.query.await("ALTER TABLE pickle_drugs_plots CHANGE water_count water_until BIGINT NOT NULL DEFAULT 0")
                     MySQL.query.await("UPDATE pickle_drugs_plots SET water_until = 0")
+                end
+                if not has.soil_added_at then
+                    MySQL.query.await("ALTER TABLE pickle_drugs_plots ADD COLUMN soil_added_at BIGINT NOT NULL DEFAULT 0 AFTER stage")
+                    -- Backfill: anything already planted predates the soil
+                    -- step; mark soil added at the same instant so the plot
+                    -- doesn't regress to "Needs Soil".
+                    MySQL.query.await("UPDATE pickle_drugs_plots SET soil_added_at = stage_started_at WHERE stage_started_at > 0")
                 end
                 LoadPlots()
             end)

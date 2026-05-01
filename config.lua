@@ -14,7 +14,7 @@ Config.GrowSpots = {
     {
         id     = "starter_weed",
         drug   = "weed",
-        coords = vector4(450.4583, -1014.3433, 27.4815, 26.7962),
+        coords = vector4(450.4583, -1014.3433, 27.495, 26.7962),
     },
 }
 
@@ -42,10 +42,26 @@ Config.Drugs.weed = {
         seed    = "pickle_capsule_seed_01",
     },
 
-    -- Cosmetic-only soil bag shown during the "Add soil" interaction.
+    -- Soil bag props shown during the "Add soil" interaction. The full
+    -- bag fades out as the player rips it; the ripped bag sits inside it
+    -- and remains for the pour phase.
     soilBag = {
         full   = "pickle_soil_bag_01",
         ripped = "pickle_soil_ripbag_01",
+    },
+
+    -- Interactive soiling scene (modules/soiling). Player drags across the
+    -- top of the soil bag to rip it (full bag fades to reveal the ripped
+    -- bag underneath), then tilts the ripped bag past `pourAngleDeg` over
+    -- the pot to fill it. The soil prop rises from `soilStartZ` up to
+    -- `planting.rubbleSoilZ` as the fill progresses.
+    soiling = {
+        ripDistance       = 0.6,    -- accumulated normalised cursor travel needed to fully rip the bag
+        pourAngleDeg      = 60.0,   -- |pitch| past which soil pours into the pot
+        secondsPerFullBag = 3.0,    -- seconds of pouring (landing in pot) to fully fill from start to end Z
+        soilStartZ        = -0.35,  -- pickle_soil_01 Z offset (relative to plot centre) at 0% fill;
+                                    -- end Z reuses planting.rubbleSoilZ
+        cameraDistMul     = 1.4,
     },
 
     -- Interactive planting scene (modules/planting). Player tilts the

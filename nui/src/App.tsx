@@ -12,16 +12,17 @@ type PlotStatus = {
     x?: number;        // 0..1 normalised screen X
     y?: number;        // 0..1 normalised screen Y
     drug?: string;
-    status?: "ready_plant" | "needs_water" | "ready_harvest" | "growing";
+    status?: "needs_soil" | "ready_plant" | "needs_water" | "ready_harvest" | "growing";
     growProgress?: number;   // 0..1
     waterProgress?: number;  // 0..1 reservoir level
     showWater?: boolean;
     budsLeft?: number;
 };
 
-type Mode = "idle" | "cutting" | "watering" | "planting";
+type Mode = "idle" | "cutting" | "watering" | "planting" | "soiling";
 
 type PlantingPayload = { plotId: string };
+type SoilingPayload = { plotId: string };
 
 /**
  * Bar that rAF-lerps its visible width toward the target value, so jumpy
@@ -75,7 +76,8 @@ function SmoothBar({
 }
 
 const TOP_BAR_LABELS: Record<NonNullable<PlotStatus["status"]>, string> = {
-    ready_plant:   "Ready to Plant",
+    needs_soil:    "Needs Soil",
+    ready_plant:   "Needs Seed",
     needs_water:   "Needs Water",
     ready_harvest: "Ready to Harvest",
     growing:       "Total grow progress",
@@ -137,6 +139,15 @@ function App() {
         heldRef.current.clear();
     });
 
+    useNuiEvent<SoilingPayload>("openSoiling", () => {
+        setMode("soiling");
+        requestAnimationFrame(() => rootRef.current?.focus());
+    });
+    useNuiEvent<void>("closeSoiling", () => {
+        setMode("idle");
+        heldRef.current.clear();
+    });
+
     useEffect(() => {
         rootRef.current?.focus();
     }, []);
@@ -191,6 +202,19 @@ function App() {
         return () => window.clearInterval(tick);
     }, [mode]);
 
+    // ─── Soiling tick: same stream shape (cursor + A/D) ───────────────────
+    useEffect(() => {
+        if (mode !== "soiling") return;
+        const tick = window.setInterval(() => {
+            fetchNui("soilingInput", {
+                cursorX: cursorRef.current.x,
+                cursorY: cursorRef.current.y,
+                heldKeys: [...heldRef.current],
+            });
+        }, 16);
+        return () => window.clearInterval(tick);
+    }, [mode]);
+
     const cursorRef = useRef({ x: 0.5, y: 0.5 });
     const onMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
         cursorRef.current.x = e.clientX / window.innerWidth;
@@ -207,6 +231,9 @@ function App() {
                 setMode("idle");
             } else if (mode === "planting") {
                 fetchNui("plantingClose");
+                setMode("idle");
+            } else if (mode === "soiling") {
+                fetchNui("soilingClose");
                 setMode("idle");
             }
             return;
@@ -230,16 +257,24 @@ function App() {
         fetchNui("clickAt", { x, y });
     };
     const onMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
-        if (mode !== "planting" || e.button !== 0) return;
+        if (e.button !== 0) return;
         const x = e.clientX / window.innerWidth;
         const y = e.clientY / window.innerHeight;
-        fetchNui("plantingClick", { x, y, pressed: true });
+        if (mode === "planting") {
+            fetchNui("plantingClick", { x, y, pressed: true });
+        } else if (mode === "soiling") {
+            fetchNui("soilingClick", { x, y, pressed: true });
+        }
     };
     const onMouseUp = (e: React.MouseEvent<HTMLDivElement>) => {
-        if (mode !== "planting" || e.button !== 0) return;
+        if (e.button !== 0) return;
         const x = e.clientX / window.innerWidth;
         const y = e.clientY / window.innerHeight;
-        fetchNui("plantingClick", { x, y, pressed: false });
+        if (mode === "planting") {
+            fetchNui("plantingClick", { x, y, pressed: false });
+        } else if (mode === "soiling") {
+            fetchNui("soilingClick", { x, y, pressed: false });
+        }
     };
 
     return (
@@ -307,6 +342,8 @@ function App() {
                                             ? 1
                                             : plotStatus.status === "ready_plant"
                                             ? 1
+                                            : plotStatus.status === "needs_soil"
+                                            ? 1
                                             : 0
                                     }
                                     className={
@@ -314,6 +351,8 @@ function App() {
                                             ? "bg-amber-400"
                                             : plotStatus.status === "ready_plant"
                                             ? "bg-emerald-400"
+                                            : plotStatus.status === "needs_soil"
+                                            ? "bg-orange-700"
                                             : "bg-primary"
                                     }
                                 />
@@ -356,6 +395,22 @@ function App() {
                             </div>
                             <span className="text-xs text-muted-foreground tabular-nums">
                                 {heading.toFixed(0)}°
+                            </span>
+                        </CardContent>
+                    </Card>
+                </div>
+            )}
+
+            {mode === "soiling" && (
+                <div className="absolute inset-x-0 bottom-10 flex justify-center pointer-events-none">
+                    <Card className="w-[560px] bg-black/55 border-white/10">
+                        <CardContent className="flex items-center gap-3 py-3">
+                            <Sprout className="h-4 w-4 text-orange-400" />
+                            <span className="text-sm">
+                                Hold left-click and drag to rip the bag · then move it over the pot and tilt with{" "}
+                                <kbd className="px-1 rounded bg-muted text-xs">A</kbd> /{" "}
+                                <kbd className="px-1 rounded bg-muted text-xs">D</kbd> to pour ·{" "}
+                                <kbd className="px-1 rounded bg-muted text-xs">Esc</kbd> to cancel
                             </span>
                         </CardContent>
                     </Card>
