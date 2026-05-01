@@ -63,6 +63,76 @@ Config.Employees = {
     arriveDistance = 1.25,
 }
 
+-- ─── Housing ───────────────────────────────────────────────────────────────
+-- Houses (world buildings) and reusable interior templates live in DB and
+-- are CRUD-managed via the `/drugs` admin UI. The block below tunes the
+-- shared player-facing behaviour (grid renderer, lease ticker, etc).
+--
+-- Houses are either:
+--   * teleport — bucketed, the player teleports to the interior's door
+--                point and exits via an in-interior ox_target.
+--   * mlo      — existing in-world building, no bucket, no teleport;
+--                ox_lib polyzone is used to detect entry/exit instead.
+Config.Housing = {
+    -- Cell size (in metres) used by the in-world zone picker. Cells are
+    -- always axis-aligned squares of this size.
+    gridCellSize = 0.5,
+
+    -- Preview models used when an admin picks an interior / world point.
+    -- `isPed = true` spawns the model as a ped (e.g. for the idle employee
+    -- point); otherwise it's spawned as a prop. Each entry's model is also
+    -- used to render the *other* already-placed points in-world while a
+    -- pick is in progress, so the admin can see the full layout.
+    placementProps = {
+        door       = { model = "v_ilev_fh_frntdoor" },
+        exit       = { model = "v_ilev_fh_frntdoor" },
+        idle       = { model = "s_m_m_gardener_01", isPed = true },
+        mgmt       = { model = "prop_laptop_01a" },
+        house_door = { model = "v_ilev_fh_frntdoor" },
+    },
+
+    -- "Same z-level (grace penalty is fine)" — entities are placed at the
+    -- zone's z but the visualizer accepts a vertical tolerance per zone.
+    -- This is just the default; zones can override.
+    defaultZTolerance = 0.6,
+
+    -- Lease ticker. Sweep every `sweepIntervalMs`; if rent_due_at is past
+    -- the current time the lease lapses (entities frozen, peds despawned,
+    -- residents booted from the bucket).
+    sweepIntervalMs   = 60 * 1000,
+    rentGracePeriodMs = 0,
+
+    -- Routing buckets are derived from the house id: bucketBase + hash.
+    -- 100000 keeps us clear of typical world / framework reserved ranges.
+    bucketBase = 100000,
+
+    -- Player-side placement preview tuning. Colours are 0..255.
+    placement = {
+        previewAlpha    = 180,
+        gridLineAlpha   = 90,
+        validColor      = { r = 80,  g = 200, b = 120 },
+        invalidColor    = { r = 230, g = 80,  b = 80 },
+        emptyColor      = { r = 220, g = 220, b = 220 },
+        occupiedColor   = { r = 110, g = 110, b = 110 },
+        cellHeight      = 0.05, -- visual thickness of the rendered cell tile
+    },
+
+    -- Money handling. "cash" mode debits a cash item via the Inventory
+    -- bridge; "framework" mode calls Player.GetMoney/RemoveMoney through
+    -- the housing module's inline framework probe (qb/qbx/esx).
+    money = {
+        mode      = "framework",          -- "cash" | "framework"
+        cashItem  = "cash",               -- only used in "cash" mode
+        moneyType = "cash",               -- framework wallet ("cash" | "bank")
+    },
+
+    -- Teleport transition tuning.
+    teleport = {
+        fadeOutMs = 400,
+        fadeInMs  = 400,
+    },
+}
+
 -- ─── Drug definitions ───────────────────────────────────────────────────────
 -- Plot LOCATIONS are no longer here — they live in `pickle_drugs_plots`
 -- and are CRUD-managed via the `/drugs` admin UI.

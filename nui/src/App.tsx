@@ -5,8 +5,10 @@ import {
     Eye,
     Leaf,
     Mountain,
+    Move,
     Scissors,
     Sprout,
+    Trash2,
     X,
 } from "lucide-react";
 
@@ -15,6 +17,10 @@ import { CreatorPanel, type DrugOption, type PlotRow } from "./CreatorPanel";
 import { EmployeesPanel, type EmployeeRow } from "./EmployeesPanel";
 import { AssignerPanel, type AssignerPlot } from "./AssignerPanel";
 import { EmployeeInfoPanel } from "./EmployeeInfoPanel";
+import { HousingPanel, type Interior, type House } from "./HousingPanel";
+import { HouseManagePanel, type HouseManageData } from "./HouseManagePanel";
+import { HousePlacementHud, type PlacementHudData } from "./HousePlacementHud";
+import { ZonePickerHud, type ZonePickerHudData } from "./ZonePickerHud";
 
 // ─── Types ────────────────────────────────────────────────────────────────
 
@@ -24,7 +30,9 @@ type ActionId =
     | "planting"
     | "watering"
     | "cutting"
-    | "inspect";
+    | "inspect"
+    | "move"
+    | "remove";
 
 type StatusKey =
     | "needs_soil"
@@ -140,6 +148,8 @@ const ICON_MAP: Record<string, React.ElementType> = {
     droplet: Droplet,
     scissors: Scissors,
     eye: Eye,
+    move: Move,
+    trash: Trash2,
 };
 
 function ActionIcon({ name, className }: { name: string; className?: string }) {
@@ -183,6 +193,18 @@ const TONES: Record<ActionId, { hover: string; active: string }> = {
             "hover:bg-violet-500/25 hover:ring-violet-400/70 hover:text-violet-50 hover:shadow-[0_0_14px_-6px_rgba(167,139,250,0.7)]",
         active:
             "bg-violet-500/30 ring-violet-400/70 text-violet-50 shadow-[0_0_18px_-6px_rgba(167,139,250,0.75)]",
+    },
+    move: {
+        hover:
+            "hover:bg-amber-500/25 hover:ring-amber-400/70 hover:text-amber-50 hover:shadow-[0_0_14px_-6px_rgba(251,191,36,0.7)]",
+        active:
+            "bg-amber-500/30 ring-amber-400/70 text-amber-50 shadow-[0_0_18px_-6px_rgba(251,191,36,0.75)]",
+    },
+    remove: {
+        hover:
+            "hover:bg-red-500/25 hover:ring-red-400/70 hover:text-red-50 hover:shadow-[0_0_14px_-6px_rgba(248,113,113,0.7)]",
+        active:
+            "bg-red-500/30 ring-red-400/70 text-red-50 shadow-[0_0_18px_-6px_rgba(248,113,113,0.75)]",
     },
     menu: { hover: "", active: "" },
 };
@@ -549,6 +571,22 @@ function App() {
     const [empInfoOpen, setEmpInfoOpen] = useState(false);
     const [empInfoData, setEmpInfoData] = useState<EmployeeRow | null>(null);
 
+    // Housing admin
+    const [housingOpen, setHousingOpen] = useState(false);
+    const [housingHidden, setHousingHidden] = useState(false);
+    const [housingPanel, setHousingPanel] = useState<"houses" | "interiors">("houses");
+    const [housingInitial, setHousingInitial] = useState<{ interiors: Interior[]; houses: House[] }>({ interiors: [], houses: [] });
+
+    // Player house management
+    const [houseManageOpen, setHouseManageOpen] = useState(false);
+    const [houseManageData, setHouseManageData] = useState<HouseManageData | null>(null);
+
+    // Placement HUD
+    const [placementHud, setPlacementHud] = useState<PlacementHudData | null>(null);
+
+    // Zone picker HUD (admin in-world zone bounds picker)
+    const [zonePickerHud, setZonePickerHud] = useState<ZonePickerHudData | null>(null);
+
     const [pitcherLevel, setPitcherLevel] = useState(1.0);
     const [plantWaterLevel, setPlantWaterLevel] = useState(0.0);
     const [showPlantWater, setShowPlantWater] = useState(false);
@@ -636,6 +674,46 @@ function App() {
         setEmpInfoOpen(false);
         setEmpInfoData(null);
     });
+    // Housing admin events
+    useNuiEvent<{ panel: "houses" | "interiors"; interiors: Interior[]; houses: House[] }>(
+        "openHousing",
+        (data) => {
+            if (!data) return;
+            setHousingPanel(data.panel ?? "houses");
+            setHousingInitial({ interiors: data.interiors ?? [], houses: data.houses ?? [] });
+            setHousingHidden(false);
+            setHousingOpen(true);
+        },
+    );
+    useNuiEvent<void>("closeHousing", () => setHousingOpen(false));
+    useNuiEvent<void>("housingMinimize", () => setHousingHidden(true));
+    useNuiEvent<{ panel?: "houses" | "interiors" }>("housingRestore", (d) => {
+        setHousingHidden(false);
+        if (d?.panel) setHousingPanel(d.panel);
+    });
+
+    // House manage panel
+    useNuiEvent<HouseManageData>("openHouseManage", (data) => {
+        if (!data) return;
+        setHouseManageData(data);
+        setHouseManageOpen(true);
+    });
+    useNuiEvent<void>("closeHouseManage", () => {
+        setHouseManageOpen(false);
+        setHouseManageData(null);
+    });
+
+    // Placement HUD
+    useNuiEvent<PlacementHudData>("openPlacementHud", (data) => setPlacementHud(data ?? null));
+    useNuiEvent<void>("closePlacementHud", () => setPlacementHud(null));
+
+    // Zone picker HUD
+    useNuiEvent<ZonePickerHudData>("openZonePickerHud", (data) => setZonePickerHud(data ?? null));
+    useNuiEvent<ZonePickerHudData>("updateZonePickerHud", (data) => {
+        if (data) setZonePickerHud(data);
+    });
+    useNuiEvent<void>("closeZonePickerHud", () => setZonePickerHud(null));
+
     useNuiEvent<void>("closePlantScene", () => {
         setOpen(false);
         setStatus(null);
@@ -747,8 +825,44 @@ function App() {
         employeesOpen ||
         assignerOpen ||
         empInfoOpen ||
+        housingOpen ||
+        houseManageOpen ||
+        !!placementHud ||
+        !!zonePickerHud ||
         !!gizmoHelp;
     if (!anyOpen) return null;
+
+    if (housingOpen && !open) {
+        return (
+            <>
+                <HousingPanel
+                    initial={housingInitial}
+                    panel={housingPanel}
+                    hidden={housingHidden}
+                    onClose={() => fetchNui("housingClose")}
+                />
+                {gizmoHelp && <GizmoHelpBar {...gizmoHelp} />}
+                {zonePickerHud && <ZonePickerHud data={zonePickerHud} />}
+            </>
+        );
+    }
+
+    if (houseManageOpen && houseManageData && !open) {
+        return (
+            <HouseManagePanel
+                data={houseManageData}
+                onClose={() => fetchNui("houseManageClose")}
+            />
+        );
+    }
+
+    if (placementHud && !open) {
+        return <HousePlacementHud data={placementHud} />;
+    }
+
+    if (zonePickerHud && !open) {
+        return <ZonePickerHud data={zonePickerHud} />;
+    }
 
     if (creatorOpen && !open) {
         return (

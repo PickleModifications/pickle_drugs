@@ -1,7 +1,36 @@
 import { useEffect, useState } from "react";
-import { MapPin, Move, Plus, Trash2, X } from "lucide-react";
+import { Building, Layers, MapPin, Move, Plus, Sprout, Trash2, X } from "lucide-react";
 
 import { fetchNui } from "@/lib/nui";
+
+function DrugsTabBar({ active }: { active: "plots" | "houses" | "interiors" }) {
+    const tab = (id: "plots" | "houses" | "interiors", label: string, Icon: React.ElementType) => {
+        const isActive = active === id;
+        return (
+            <button
+                key={id}
+                onClick={() => fetchNui("drugsAdminSwitchTab", { tab: id })}
+                disabled={isActive}
+                className={"px-3 py-1.5 rounded text-xs ring-1 transition-colors inline-flex items-center gap-1.5 " +
+                    (isActive
+                        ? "bg-emerald-500/25 ring-emerald-400/60 text-emerald-50 cursor-default"
+                        : "ring-white/15 text-white/70 hover:bg-white/[0.06]")}
+            >
+                <Icon className="h-3.5 w-3.5" />
+                {label}
+            </button>
+        );
+    };
+    return (
+        <div className="flex items-center justify-center gap-1">
+            {tab("plots", "Plots", Sprout)}
+            {tab("houses", "Houses", Building)}
+            {tab("interiors", "Interiors", Layers)}
+        </div>
+    );
+}
+
+export { DrugsTabBar };
 
 export type DrugOption = { id: string; label: string };
 
@@ -54,11 +83,9 @@ export function CreatorPanel({
                 {/* Header */}
                 <div className="grid grid-cols-[auto_1fr_auto] items-center gap-4 px-5 h-10 border-b border-white/5 bg-white/[0.02]">
                     <span className="text-[10px] uppercase tracking-[0.18em] text-white/45 whitespace-nowrap">
-                        Plot Manager
+                        Drugs Admin
                     </span>
-                    <span className="text-[11px] text-white/50 italic justify-self-center">
-                        Create & manage drug plot locations
-                    </span>
+                    <DrugsTabBar active="plots" />
                     <button
                         onClick={onClose}
                         className="h-7 w-7 inline-flex items-center justify-center rounded ring-1 ring-white/25 text-white/70 hover:text-red-200 hover:bg-red-500/15 hover:ring-red-400/50 transition-colors"

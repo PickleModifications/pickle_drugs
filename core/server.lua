@@ -6,12 +6,12 @@ RegisterCommand(Config.Command, function(source)
     TriggerClientEvent("pickle_drugs:debugOpenCutting", source)
 end, false)
 
--- Plot creator UI. Admin-only. Opens the NUI plot manager where admins
--- CRUD plot locations (drug type + coordinates) using the placement
--- gizmo. The admin check resolves through the active framework bridge.
+-- Drugs Admin. Admin-only. Opens the bottom-anchored housing panel
+-- (Properties + Interiors tabs). Plots are no longer managed standalone —
+-- they live inside a Property's zones.
 RegisterCommand("drugs", function(source)
     if Admin and Admin.IsAdmin and not Admin.IsAdmin(source) then return end
-    TriggerClientEvent("pickle_drugs:openCreator", source)
+    TriggerClientEvent("pickle_drugs:openHousing", source, "houses")
 end, false)
 
 -- NPC Employee manager. Admin-only. Opens the roster UI where admins
@@ -21,3 +21,4 @@ RegisterCommand("employees", function(source)
     if Admin and Admin.IsAdmin and not Admin.IsAdmin(source) then return end
     TriggerClientEvent("pickle_drugs:openEmployees", source)
 end, false)
+

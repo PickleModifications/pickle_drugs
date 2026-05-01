@@ -6,7 +6,14 @@
 -- each task's deadline so the action lands regardless of any one
 -- client's local sync state.
 
-local Employees = {}        -- id → row
+-- `Employees` is the public module table (housing/server.lua and other
+-- modules call into Employees.OnHouseLeaseLapsed etc.). The roster of
+-- live employees is kept on a separate `Roster` table so module-style
+-- function assignments don't show up when we iterate the roster with
+-- pairs() — that previously crashed listEmployees and silently broke
+-- the assign-plots UI.
+Employees = Employees or {}
+local Roster = {}           -- id → row
 local EmployeeState = {}    -- id → runtime { state, taskDeadline, currentPlotId, currentAction, currentBudIndex, cooldownUntil }
 local CurrentTask  = {}     -- id → last broadcast task (sent to joiners)
 
@@ -21,6 +28,17 @@ end
 
 -- ─── Persistence ───────────────────────────────────────────────────────────
 
+--- Normalises a possibly-NULL/blank house_id to nil so downstream
+--- truthiness checks (`if emp.house_id then`) actually mean "is bound to
+--- a house". oxmysql can hand back empty strings or non-string sentinels
+--- for NULL columns; both should be treated as unbound.
+local function normaliseHouseId(v)
+    if v == nil then return nil end
+    if type(v) ~= "string" then return nil end
+    if v == "" then return nil end
+    return v
+end
+
 local function rowFromDb(row)
     return {
         id              = row.id,
@@ -32,14 +50,58 @@ local function rowFromDb(row)
         home_z          = tonumber(row.home_z) or 0,
         home_w          = tonumber(row.home_w) or 0,
         assigned_plots  = jsonDecodeArray(row.assigned_plots),
+        house_id        = normaliseHouseId(row.house_id),
         updated_at      = tonumber(row.updated_at) or 0,
     }
+end
+
+--- Returns the world-space "home" coords for an employee, falling back to
+--- the bound house's interior idle point if the employee was created
+--- through a house and has no explicit home_*. Per-house workers idle
+--- inside their interior (in the house's bucket); legacy employees stay
+--- at their world coords.
+local function effectiveHome(emp)
+    if emp.house_id and Housing and Housing.GetHouse then
+        local h = Housing.GetHouse(emp.house_id)
+        local interior = h and Housing.GetInterior(h.interior_id) or nil
+        if interior and (interior.idle_x ~= 0 or interior.idle_y ~= 0 or interior.idle_z ~= 0) then
+            return interior.idle_x, interior.idle_y, interior.idle_z, interior.idle_w
+        end
+    end
+    return emp.home_x, emp.home_y, emp.home_z, emp.home_w
+end
+
+--- Returns the routing bucket the employee's ped should sit in. 0 unless
+--- bound to a teleport-kind house with a non-zero bucket.
+local function effectiveBucket(emp)
+    if emp.house_id and Housing and Housing.GetHouse then
+        local h = Housing.GetHouse(emp.house_id)
+        if h and h.kind == "teleport" then return h.bucket or 0 end
+    end
+    return 0
+end
+
+--- Drops plot ids from `emp.assigned_plots` that no longer exist on the
+--- server. Plots can be deleted (or recreated with new ids) without the
+--- employee table knowing — without this the scheduler keeps trying to
+--- work ghost ids and the employee idles forever.
+local function scrubStaleAssignments(emp)
+    if not emp.assigned_plots or #emp.assigned_plots == 0 then return false end
+    local kept = {}
+    for _, pid in ipairs(emp.assigned_plots) do
+        if Grow and Grow.GetServerPlot and Grow.GetServerPlot(pid) then
+            kept[#kept + 1] = pid
+        end
+    end
+    if #kept == #emp.assigned_plots then return false end
+    emp.assigned_plots = kept
+    return true
 end
 
 local function LoadEmployees()
     local rows = MySQL.query.await("SELECT * FROM pickle_drugs_employees") or {}
     for _, row in ipairs(rows) do
-        Employees[row.id] = rowFromDb(row)
+        Roster[row.id] = rowFromDb(row)
         EmployeeState[row.id] = { state = "idle", cooldownUntil = 0 }
     end
     debugPrint(("employees: loaded %d"):format(#rows))
@@ -48,11 +110,12 @@ end
 local function PersistEmployee(emp)
     emp.updated_at = now()
     MySQL.update.await(
-        "UPDATE pickle_drugs_employees SET model=?, first_name=?, last_name=?, home_x=?, home_y=?, home_z=?, home_w=?, assigned_plots=?, updated_at=? WHERE id=?",
+        "UPDATE pickle_drugs_employees SET model=?, first_name=?, last_name=?, home_x=?, home_y=?, home_z=?, home_w=?, assigned_plots=?, house_id=?, updated_at=? WHERE id=?",
         {
             emp.model, emp.first_name, emp.last_name,
             emp.home_x, emp.home_y, emp.home_z, emp.home_w,
             json.encode(emp.assigned_plots or {}),
+            emp.house_id,
             emp.updated_at,
             emp.id,
         }
@@ -72,13 +135,15 @@ local function broadcastTask(emp, task)
 end
 
 local function makeIdleTask(emp)
+    local hx, hy, hz, hw = effectiveHome(emp)
     return {
         empId    = emp.id,
         kind     = "idle",
-        target   = { x = emp.home_x, y = emp.home_y, z = emp.home_z, w = emp.home_w },
+        target   = { x = hx, y = hy, z = hz, w = hw },
         plotId   = nil,
         anim     = nil,
         deadline = now(),
+        bucket   = effectiveBucket(emp),
     }
 end
 
@@ -90,7 +155,7 @@ end
 -- ─── Strict 1:1 plot ownership ────────────────────────────────────────────
 
 local function plotOwnerOf(plotId)
-    for _, emp in pairs(Employees) do
+    for _, emp in pairs(Roster) do
         for _, pid in ipairs(emp.assigned_plots or {}) do
             if pid == plotId then return emp end
         end
@@ -98,7 +163,7 @@ local function plotOwnerOf(plotId)
 end
 
 local function scrubPlotFromAll(plotId, exceptEmpId)
-    for _, emp in pairs(Employees) do
+    for _, emp in pairs(Roster) do
         if emp.id ~= exceptEmpId then
             local before = #emp.assigned_plots
             local kept = {}
@@ -122,7 +187,7 @@ end
 
 local function generateEmployeeId()
     local id = ("emp_%d"):format(now())
-    if not Employees[id] then return id end
+    if not Roster[id] then return id end
     return ("%s_%d"):format(id, math.random(1000, 9999))
 end
 
@@ -146,7 +211,7 @@ RegisterNetEvent("pickle_drugs:createEmployee", function(model, firstName, lastN
         home_x = x, home_y = y, home_z = z, home_w = w,
         assigned_plots = {}, updated_at = now(),
     }
-    Employees[id] = emp
+    Roster[id] = emp
     EmployeeState[id] = { state = "idle", cooldownUntil = 0 }
 
     MySQL.insert.await(
@@ -162,7 +227,7 @@ end)
 RegisterNetEvent("pickle_drugs:updateEmployeeCoords", function(empId, x, y, z, w)
     local src = source
     if not adminCheck(src) then return end
-    local emp = Employees[empId]
+    local emp = Roster[empId]
     if not emp then return end
     x = tonumber(x); y = tonumber(y); z = tonumber(z); w = tonumber(w) or 0.0
     if not x or not y or not z then return end
@@ -177,8 +242,8 @@ end)
 RegisterNetEvent("pickle_drugs:deleteEmployee", function(empId)
     local src = source
     if not adminCheck(src) then return end
-    if not Employees[empId] then return end
-    Employees[empId] = nil
+    if not Roster[empId] then return end
+    Roster[empId] = nil
     EmployeeState[empId] = nil
     CurrentTask[empId] = nil
     MySQL.update.await("DELETE FROM pickle_drugs_employees WHERE id=?", { empId })
@@ -188,23 +253,44 @@ end)
 
 RegisterNetEvent("pickle_drugs:assignPlots", function(empId, plotIds)
     local src = source
-    if not adminCheck(src) then return end
-    local emp = Employees[empId]
+    local emp = Roster[empId]
     if not emp then return end
+    -- Admins can assign anywhere. Otherwise the caller has to be the
+    -- owner of the worker's house, and every plot they hand in has to
+    -- belong to that same house — so a house owner can't reach into a
+    -- neighbour's plots through their own worker.
+    local houseOk = false
+    if emp.house_id and Housing and Housing.GetHouse and Housing.IsHouseOwner then
+        local h = Housing.GetHouse(emp.house_id)
+        if h and Housing.IsHouseOwner(src, h) then houseOk = true end
+    end
+    if not (adminCheck(src) or houseOk) then return end
     if type(plotIds) ~= "table" then plotIds = {} end
 
     -- Validate each plot id exists, dedupe, scrub from other employees
-    -- (strict 1:1 ownership), then assign to this one.
+    -- (strict 1:1 ownership), then assign to this one. House-owner callers
+    -- are additionally restricted to plots belonging to the worker's house.
     local seen, kept = {}, {}
     for _, pid in ipairs(plotIds) do
-        if type(pid) == "string" and not seen[pid] and Grow.GetServerPlot(pid) then
-            seen[pid] = true
-            kept[#kept + 1] = pid
-            scrubPlotFromAll(pid, empId)
+        if type(pid) == "string" and not seen[pid] then
+            local plot = Grow.GetServerPlot(pid)
+            if plot then
+                if houseOk and not adminCheck(src) and plot.house_id ~= emp.house_id then
+                    -- House owner trying to assign a plot outside their house — skip.
+                else
+                    seen[pid] = true
+                    kept[#kept + 1] = pid
+                    scrubPlotFromAll(pid, empId)
+                end
+            end
         end
     end
     emp.assigned_plots = kept
     SyncEmployee(emp)
+    -- Reset to idle so the next scheduler tick re-evaluates against the
+    -- new pool instead of waiting for the in-flight task to finish.
+    EmployeeState[empId] = { state = "idle", cooldownUntil = 0 }
+    broadcastTask(emp, makeIdleTask(emp))
     notify(src, ("Assigned %d plot(s)"):format(#kept), "success")
 end)
 
@@ -212,7 +298,7 @@ end)
 
 lib.callback.register("pickle_drugs:listEmployees", function()
     local out = {}
-    for _, emp in pairs(Employees) do
+    for _, emp in pairs(Roster) do
         out[#out + 1] = {
             id            = emp.id,
             model         = emp.model,
@@ -220,6 +306,7 @@ lib.callback.register("pickle_drugs:listEmployees", function()
             lastName      = emp.last_name,
             home          = { x = emp.home_x, y = emp.home_y, z = emp.home_z, w = emp.home_w },
             assignedPlots = emp.assigned_plots or {},
+            houseId       = emp.house_id,
         }
     end
     table.sort(out, function(a, b) return a.id < b.id end)
@@ -329,15 +416,26 @@ end
 --- Picks the closest assigned plot that needs an action. Returns
 --- (plotId, action, budIndex_or_nil) or nil if all assigned plots are
 --- already up to date.
+--- Every employee — house-bound or not — works only its explicit
+--- `assigned_plots` list. House-bound employees were previously auto-
+--- assigned every plot in their house, but that meant a worker would
+--- silently start tending a freshly-placed plot the moment the owner
+--- dropped it. Owners now opt plots in via the /employees assigner; on
+--- hire, createHouseEmployee seeds the list with the plots that already
+--- exist so the day-one experience matches the old behaviour.
+local function plotPoolFor(emp)
+    return emp.assigned_plots or {}
+end
+
 local function pickNextWorkPlot(emp)
     local nowMs   = now()
-    local origin  = { x = emp.home_x, y = emp.home_y, z = emp.home_z }
+    local hx, hy, hz = effectiveHome(emp)
+    local origin = { x = hx, y = hy, z = hz }
     local bestId, bestAction, bestBud, bestDist
-    for _, pid in ipairs(emp.assigned_plots or {}) do
+    for _, pid in ipairs(plotPoolFor(emp)) do
         local plot = Grow.GetServerPlot(pid)
         if plot then
             local drugCfg = Config.Drugs[plot.drug]
-            -- Resolve before deciding so stage/water are current.
             Grow.ResolveStage(plot, drugCfg, nowMs)
             local action, budIdx = Grow.NextEmployeeAction(plot, drugCfg, nowMs)
             if action then
@@ -392,7 +490,7 @@ end
 --- server's walk deadline. Validates the employee is still walking to
 --- the plot id the client claims, then advances immediately.
 RegisterNetEvent("pickle_drugs:employeeArrivedAtPlot", function(empId, plotId)
-    local emp = Employees[empId]
+    local emp = Roster[empId]
     local s   = EmployeeState[empId]
     if not emp or not s then return end
     if s.state ~= "going" or s.currentPlotId ~= plotId then return end
@@ -409,10 +507,53 @@ CreateThread(function()
     -- deadline is mostly burned by the time they receive it — the ped
     -- ends up walking a fraction of the way and TPing for the rest.
     Wait(6000)
+    -- Plot cache is loaded by grow/server.lua independently; by the time
+    -- the 6s grace is up it's ready. Drop any assigned plot ids that
+    -- don't resolve so a stale row doesn't keep the employee idling.
+    for _, emp in pairs(Roster) do
+        if scrubStaleAssignments(emp) then
+            debugPrint(("employees: scrubbed stale plot ids on %s, %d remain"):format(emp.id, #emp.assigned_plots))
+            PersistEmployee(emp)
+            TriggerClientEvent("pickle_drugs:employeeUpdate", -1, emp)
+        end
+    end
+    -- Rebind employees that were created via the house "Hire" flow but
+    -- ended up with an empty / nil `house_id` (a stale houseId in the
+    -- panel state during hire). Match by home coords == an interior's
+    -- idle point: that's exactly what createHouseEmployee writes when
+    -- it succeeds, so any unbound emp whose home matches a house's
+    -- interior idle point is almost certainly that house's worker.
+    if Housing and Housing.GetAllHouses and Housing.GetInterior then
+        local function near(a, b) return math.abs((a or 0) - (b or 0)) < 0.05 end
+        local rebound = 0
+        for _, emp in pairs(Roster) do
+            if not emp.house_id or emp.house_id == "" then
+                for _, h in pairs(Housing.GetAllHouses() or {}) do
+                    if h.id ~= "_legacy" then
+                        local interior = Housing.GetInterior(h.interior_id)
+                        if interior
+                           and near(interior.idle_x, emp.home_x)
+                           and near(interior.idle_y, emp.home_y)
+                           and near(interior.idle_z, emp.home_z)
+                        then
+                            emp.house_id = h.id
+                            PersistEmployee(emp)
+                            TriggerClientEvent("pickle_drugs:employeeUpdate", -1, emp)
+                            rebound = rebound + 1
+                            break
+                        end
+                    end
+                end
+            end
+        end
+        if rebound > 0 then
+            print(("[pickle_drugs] employees: rebound %d unbound worker(s) to their house"):format(rebound))
+        end
+    end
     while true do
         Wait(500)
         local nowMs = now()
-        for empId, emp in pairs(Employees) do
+        for empId, emp in pairs(Roster) do
             local s = EmployeeState[empId]
             if s then
                 if s.state == "idle" then
@@ -420,7 +561,8 @@ CreateThread(function()
                         local pid, action, bud = pickNextWorkPlot(emp)
                         if pid then
                             local plot = Grow.GetServerPlot(pid)
-                            local origin = { x = emp.home_x, y = emp.home_y, z = emp.home_z }
+                            local hx, hy, hz = effectiveHome(emp)
+                            local origin = { x = hx, y = hy, z = hz }
                             if s.lastPos then origin = s.lastPos end
                             local spot = workSpotOf(plot)
                             s.currentPlotId   = pid
@@ -451,9 +593,11 @@ CreateThread(function()
                                     durationMs = walkMs,
                                 })
                             end
-                        elseif s.lastPos and distance3(s.lastPos, { x = emp.home_x, y = emp.home_y, z = emp.home_z }) > 3.0 then
+                        else
+                            local hx, hy, hz, hw = effectiveHome(emp)
+                            if s.lastPos and distance3(s.lastPos, { x = hx, y = hy, z = hz }) > 3.0 then
                             -- Nothing to do but ped wandered; send back home.
-                            local target = { x = emp.home_x, y = emp.home_y, z = emp.home_z }
+                            local target = { x = hx, y = hy, z = hz, w = hw }
                             local walkMs = walkDuration(s.lastPos, target)
                             s.state        = "returning"
                             s.taskDeadline = nowMs + walkMs
@@ -466,6 +610,7 @@ CreateThread(function()
                                 deadline   = s.taskDeadline,
                                 durationMs = walkMs,
                             })
+                            end
                         end
                     end
                 elseif s.state == "going" then
@@ -489,7 +634,8 @@ CreateThread(function()
                     end
                 elseif s.state == "returning" then
                     if nowMs >= (s.taskDeadline or 0) then
-                        s.lastPos = { x = emp.home_x, y = emp.home_y, z = emp.home_z }
+                        local hx, hy, hz = effectiveHome(emp)
+                        s.lastPos = { x = hx, y = hy, z = hz }
                         s.atPlotId = nil
                         s.state = "idle"
                         s.cooldownUntil = nowMs + empCfg("cooldownMs", 1000)
@@ -521,13 +667,23 @@ CreateThread(function()
                     updated_at      BIGINT       NOT NULL DEFAULT 0
                 )
             ]])
+            -- Housing migration: house_id binds an employee to a house;
+            -- legacy employees keep it NULL and idle at world coords.
+            local cols = MySQL.query.await(
+                "SHOW COLUMNS FROM pickle_drugs_employees WHERE Field = 'house_id'"
+            ) or {}
+            if #cols == 0 then
+                MySQL.query.await(
+                    "ALTER TABLE pickle_drugs_employees ADD COLUMN house_id VARCHAR(64) NULL"
+                )
+            end
             LoadEmployees()
         end)
         if not ok then
             print(("[pickle_drugs] employees: DB error, starting empty: %s"):format(tostring(err)))
         end
         local count = 0
-        for _ in pairs(Employees) do count = count + 1 end
+        for _ in pairs(Roster) do count = count + 1 end
         print(("[pickle_drugs] employees: ready with %d"):format(count))
 
         -- On a hot resource restart the connected players never get a
@@ -535,20 +691,123 @@ CreateThread(function()
         -- task to everyone now. Without this each ped only spawns on
         -- a client after an admin moves them via /employees (because
         -- the move triggers an employeeUpdate broadcast).
-        for _, emp in pairs(Employees) do
+        for _, emp in pairs(Roster) do
             TriggerClientEvent("pickle_drugs:employeeUpdate", -1, emp)
             local idle = makeIdleTask(emp)
             CurrentTask[emp.id] = idle
             TriggerClientEvent("pickle_drugs:employeeTask", -1, idle)
         end
+        -- Roster is fully populated and pushed to clients. Other modules
+        -- (housing.getHouseDetail) gate on this so they don't return an
+        -- empty workers list to a panel opened seconds after a hot
+        -- restart.
+        Employees.RosterReady = true
     end)
+end)
+
+-- ─── House-bound employee API ─────────────────────────────────────────────
+
+--- Called by Housing when a lease lapses. Despawn (delete from roster) any
+--- employees bound to the house — their idle target is gone (the bucket is
+--- about to be cleared) and they shouldn't keep working a property the
+--- owner just lost. Admin can re-hire after the next purchase.
+function Employees.OnHouseLeaseLapsed(houseId)
+    if not houseId then return end
+    for id, emp in pairs(Roster) do
+        if type(emp) == "table" and emp.house_id == houseId then
+            Roster[id] = nil
+            EmployeeState[id] = nil
+            CurrentTask[id] = nil
+            MySQL.update.await("DELETE FROM pickle_drugs_employees WHERE id=?", { id })
+            TriggerClientEvent("pickle_drugs:employeeRemoved", -1, id)
+        end
+    end
+end
+
+--- House-bound hire path. Owner-or-admin gated. Coords come from the
+--- bound interior's idle point; assigned_plots stays empty (the scheduler
+--- treats house-bound employees as "work everything in this house").
+RegisterNetEvent("pickle_drugs:createHouseEmployee", function(houseId, model, firstName, lastName)
+    local src = source
+    if not Housing or not Housing.GetHouse then return end
+    local house = Housing.GetHouse(houseId)
+    if not house then return end
+    if not (Housing.IsHouseOwner(src, house) or adminCheck(src)) then
+        notify(src, "Owner only", "error") return
+    end
+    if type(model) ~= "string" or model == "" then notify(src, "Bad model", "error") return end
+    firstName = (type(firstName) == "string" and firstName ~= "") and firstName or "Employee"
+    lastName  = (type(lastName)  == "string" and lastName  ~= "") and lastName  or house.id
+
+    local interior = Housing.GetInterior(house.interior_id)
+    local ix = interior and interior.idle_x or 0
+    local iy = interior and interior.idle_y or 0
+    local iz = interior and interior.idle_z or 0
+    local iw = interior and interior.idle_w or 0
+
+    -- Seed the assignment with every plot that already exists in the
+    -- house at hire time so the day-one experience matches the old
+    -- "house workers tend everything" behaviour. New plots placed
+    -- afterwards stay unassigned until the owner opts them in via the
+    -- /employees assigner — that's the explicit-only contract.
+    local seeded = {}
+    if Grow and Grow.PlotsForHouse then
+        for _, p in ipairs(Grow.PlotsForHouse(houseId)) do
+            seeded[#seeded + 1] = p.id
+        end
+    end
+    local id = generateEmployeeId()
+    local emp = {
+        id = id, model = model, first_name = firstName, last_name = lastName,
+        home_x = ix, home_y = iy, home_z = iz, home_w = iw,
+        assigned_plots = seeded, house_id = houseId, updated_at = now(),
+    }
+    Roster[id] = emp
+    EmployeeState[id] = { state = "idle", cooldownUntil = 0 }
+    MySQL.insert.await(
+        "INSERT INTO pickle_drugs_employees (id, model, first_name, last_name, home_x, home_y, home_z, home_w, assigned_plots, house_id, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        { id, model, firstName, lastName, ix, iy, iz, iw, json.encode(seeded), houseId, emp.updated_at }
+    )
+    TriggerClientEvent("pickle_drugs:employeeUpdate", -1, emp)
+    broadcastTask(emp, makeIdleTask(emp))
+    notify(src, "Employee hired", "success")
+end)
+
+RegisterNetEvent("pickle_drugs:dismissHouseEmployee", function(empId)
+    local src = source
+    local emp = Roster[empId]
+    if not emp or not emp.house_id then return end
+    local house = Housing and Housing.GetHouse and Housing.GetHouse(emp.house_id) or nil
+    if not (house and (Housing.IsHouseOwner(src, house) or adminCheck(src))) then return end
+    Roster[empId] = nil
+    EmployeeState[empId] = nil
+    CurrentTask[empId] = nil
+    MySQL.update.await("DELETE FROM pickle_drugs_employees WHERE id=?", { empId })
+    TriggerClientEvent("pickle_drugs:employeeRemoved", -1, empId)
+    notify(src, "Employee dismissed", "success")
+end)
+
+lib.callback.register("pickle_drugs:listHouseEmployees", function(_src, houseId)
+    local out = {}
+    if not houseId then return out end
+    for _, emp in pairs(Roster) do
+        if type(emp) == "table" and emp.house_id == houseId then
+            out[#out + 1] = {
+                id = emp.id, model = emp.model,
+                firstName = emp.first_name, lastName = emp.last_name,
+                houseId = emp.house_id,
+            }
+        end
+    end
+    table.sort(out, function(a, b) return a.id < b.id end)
+    return out
 end)
 
 -- Push everything to a joining player (employees + their current task).
 AddEventHandler("playerJoining", function()
     local src = source
     SetTimeout(2500, function()
-        for _, emp in pairs(Employees) do
+        for _, emp in pairs(Roster) do
             TriggerClientEvent("pickle_drugs:employeeUpdate", src, emp)
         end
         for _, task in pairs(CurrentTask) do

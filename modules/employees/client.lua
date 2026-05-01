@@ -69,16 +69,46 @@ local function attachTarget(ped, empId)
     })
 end
 
+--- Resolve the world-space home for the local spawn — house-bound
+--- employees idle at the interior's idle point in the house's bucket;
+--- legacy ones at their world coords.
+local function effectiveHome(emp)
+    if emp.house_id and Housing and Housing.GetHouse then
+        local h = Housing.GetHouse(emp.house_id)
+        local interior = h and Housing.GetInterior(h.interior_id) or nil
+        if interior and (interior.idle_x ~= 0 or interior.idle_y ~= 0 or interior.idle_z ~= 0) then
+            return interior.idle_x, interior.idle_y, interior.idle_z, interior.idle_w
+        end
+    end
+    return emp.home_x, emp.home_y, emp.home_z, emp.home_w
+end
+
 local function spawnPed(emp)
     local hash = loadModel(emp.model)
     if not hash then
         debugPrint(("employees: model %s failed to load for %s"):format(tostring(emp.model), emp.id))
         return nil
     end
-    local gz = snapToGround(emp.home_x, emp.home_y, emp.home_z)
-    local ped = CreatePed(4, hash, emp.home_x, emp.home_y, gz, emp.home_w or 0.0, false, false)
+    local hx, hy, hz, hw = effectiveHome(emp)
+    local gz = snapToGround(hx, hy, hz)
+    local ped = CreatePed(4, hash, hx, hy, gz, hw or 0.0, false, false)
     SetModelAsNoLongerNeeded(hash)
     if not ped or not DoesEntityExist(ped) then return nil end
+    -- Bucket the ped so non-residents don't see it. SetEntityRoutingBucket
+    -- is server-only; client-side we use the local-only flag and rely on
+    -- the server to set the entity's bucket. Local peds never network, so
+    -- buckets are moot — instead we hide the ped to clients who aren't in
+    -- the house's bucket by simply not spawning it.
+    if emp.house_id and Housing and Housing.GetHouse then
+        local h = Housing.GetHouse(emp.house_id)
+        if h and h.kind == "teleport" then
+            local insideId = Housing.GetCurrentBucketHouseId()
+            if insideId ~= emp.house_id then
+                DeleteEntity(ped)
+                return nil
+            end
+        end
+    end
     SetEntityInvincible(ped, true)
     SetBlockingOfNonTemporaryEvents(ped, true)
     SetPedDefaultComponentVariation(ped)
@@ -285,6 +315,48 @@ RegisterNetEvent("pickle_drugs:employeeRemoved", function(empId)
     despawn(empId)
 end)
 
+--- Re-evaluate every employee's local visibility when the player moves
+--- between buckets. House-bound peds in teleport interiors are only
+--- spawned when the player is inside the matching bucket; legacy peds
+--- never need this. We rebuild from `lib.callback` so the spawn path
+--- (which knows about house bucket gating) decides whether to keep each.
+local function reevaluatePeds()
+    if not lib then return end
+    local list = lib.callback.await("pickle_drugs:listEmployees", false) or {}
+    local seen = {}
+    for _, e in ipairs(list) do
+        seen[e.id] = true
+        local emp = {
+            id = e.id, model = e.model,
+            first_name = e.firstName, last_name = e.lastName,
+            home_x = e.home.x, home_y = e.home.y, home_z = e.home.z, home_w = e.home.w,
+            assigned_plots = e.assignedPlots,
+            house_id = e.houseId,
+        }
+        local entry = Peds[e.id]
+        if not entry then
+            local ped = spawnPed(emp)
+            if ped then Peds[e.id] = { ped = ped, model = emp.model, emp = emp } end
+        else
+            -- Despawn if the player has moved out of the relevant bucket.
+            if emp.house_id and Housing then
+                local h = Housing.GetHouse(emp.house_id)
+                if h and h.kind == "teleport"
+                    and Housing.GetCurrentBucketHouseId() ~= emp.house_id
+                then
+                    despawn(e.id)
+                end
+            end
+        end
+    end
+    for id in pairs(Peds) do
+        if not seen[id] then despawn(id) end
+    end
+end
+
+RegisterNetEvent("pickle_drugs:enteredHouse", function() reevaluatePeds() end)
+RegisterNetEvent("pickle_drugs:leftHouse",    function() reevaluatePeds() end)
+
 RegisterNetEvent("pickle_drugs:employeeTask", function(task)
     if not task or not task.empId then return end
     applyTask(task.empId, task)
@@ -320,6 +392,7 @@ CreateThread(function()
             home_z          = e.home.z,
             home_w          = e.home.w,
             assigned_plots  = e.assignedPlots,
+            house_id        = e.houseId,
         })
     end
     -- Replay whatever is in flight server-side. Without this, when the
@@ -364,6 +437,8 @@ local PED_MODELS = {
     "a_m_y_hipster_01",
     "a_m_m_hillbilly_01",
 }
+Employees = Employees or {}
+Employees.PedModels = PED_MODELS
 
 local FIRST_NAMES = {
     "Alex", "Jamie", "Riley", "Sam", "Taylor", "Casey", "Jordan", "Drew",
@@ -549,6 +624,12 @@ end
 RegisterNetEvent("pickle_drugs:openAssigner", function(empId)
     openAssigner(empId)
 end)
+
+--- Public entry point so other modules (e.g. the house management panel)
+--- can invoke the same assigner UI without going through the admin
+--- /employees command. Server still gates `pickle_drugs:assignPlots` on
+--- admin-or-house-owner authorisation.
+function Employees.OpenAssigner(empId) openAssigner(empId) end
 
 RegisterNUICallback("assignerClose", function(_, cb)
     closeAssigner()

@@ -42,6 +42,13 @@ function StartMovement(prop, data)
     local rerenderTimer = 300
     local coordsOffset = data.coordsOffset or vector3(0.0, 0.0, 0.0)
     local rotationOffset = data.rotationOffset or vector3(0.0, 0.0, 0.0)
+    -- Ignore confirm / cancel input for the first ~150ms. Without this, a
+    -- mouse click or key tap that started the gizmo (e.g. clicking the
+    -- "Place" button in NUI right before NUI focus is released) can be
+    -- read by the engine as a "just-released" event on the very first
+    -- frame and immediately end the pick. Mirrors the same buffer pattern
+    -- the housing zone picker relies on.
+    local startedAt = GetGameTimer()
     while true do
         local speedMode = 1
         local hit, hitCoords, entity = GetDirectionCoords()
@@ -69,7 +76,25 @@ function StartMovement(prop, data)
         if IsControlJustPressed(1, 47) then
             isFrozen = not isFrozen
         end
-        if data.enableCancel and (IsControlJustPressed(1, 202)) then
+        -- Suppress every pause-menu input each frame, and force the engine
+        -- back out of any frontend it has already flagged before our own
+        -- `IsDisabledControlJustReleased` check runs (the frontend tick
+        -- otherwise paints a single frame of pause). Mirrors the working
+        -- pause-suppression in housing_admin's pickZoneArea.
+        DisableControlAction(0, 199, true) -- INPUT_FRONTEND_PAUSE
+        DisableControlAction(0, 200, true) -- INPUT_FRONTEND_PAUSE_ALTERNATE
+        DisableControlAction(0, 322, true) -- INPUT_FRONTEND_PAUSE_ALTERNATE (alt)
+        if IsPauseMenuActive() then
+            SetFrontendActive(false)
+            ActivateFrontendMenu(`FE_MENU_VERSION_EMPTY_NO_BACKGROUND`, true, -1)
+        end
+        local pastInputBuffer = (GetGameTimer() - startedAt) > 150
+        if pastInputBuffer and data.enableCancel and (
+            IsControlJustPressed(1, 202)
+            or IsDisabledControlJustReleased(0, 199)
+            or IsDisabledControlJustReleased(0, 200)
+            or IsDisabledControlJustReleased(0, 322)
+        ) then
             SendNUIMessage({ action = "gizmoHelp", data = { visible = false } })
             if data.deleteEntity then
                 CleanupGizmoEntity(prop)
@@ -119,7 +144,7 @@ function StartMovement(prop, data)
         if data.lightColor then
             SetObjectLightColor(prop, 1, data.lightColor[1], data.lightColor[2], data.lightColor[3])
         end
-        if IsControlJustPressed(1, 51) then
+        if pastInputBuffer and IsControlJustPressed(1, 51) then
             break
         end
         Wait(0)
@@ -249,19 +274,38 @@ function StartGizmoEditor(data)
         if data.isPed then
             gizmoEntity = CreateGizmoPed(data.model, coords, rotation)
         else
-            local hash = ResolveGizmoModel(data.model)
-            if hash then
-                if not IsModelInCdimage(hash) then
-                    inGizmo = false
-                    return nil
-                end
+            -- Try the requested model first; if it isn't in the cd image
+            -- (some interior-only props aren't), or fails to stream, fall
+            -- back to a universally-loadable placeholder so the pick still
+            -- works. Without this, an unloadable model silently aborts the
+            -- gizmo and the admin sees only an NUI flicker.
+            local function tryLoad(modelInput)
+                local hash = ResolveGizmoModel(modelInput)
+                if not hash then return nil, "no-hash" end
+                if not IsModelInCdimage(hash) then return nil, "not-in-cdimage" end
                 RequestModel(hash)
-                while not HasModelLoaded(hash) do Wait(0) end
+                local deadline = GetGameTimer() + 5000
+                while not HasModelLoaded(hash) and GetGameTimer() < deadline do Wait(0) end
+                if not HasModelLoaded(hash) then return nil, "load-timeout" end
+                return hash, nil
+            end
+            local hash, reason = tryLoad(data.model)
+            if not hash then
+                if Config and Config.Debug then
+                    print(("[gizmo] primary model %s failed (%s); falling back to prop_mp_repair")
+                        :format(tostring(data.model), reason or "?"))
+                end
+                hash = tryLoad("prop_mp_repair")
+            end
+            if hash then
                 gizmoEntity = CreateObject(hash, coords.x, coords.y, coords.z, false, false, false)
                 SetModelAsNoLongerNeeded(hash)
             end
         end
         if not gizmoEntity or not DoesEntityExist(gizmoEntity) then
+            if Config and Config.Debug then
+                print(("[gizmo] CreateObject failed for model %s"):format(tostring(data.model)))
+            end
             inGizmo = false
             return nil
         end

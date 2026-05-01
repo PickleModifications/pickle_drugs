@@ -179,6 +179,13 @@ local function ComputeActions(plot, drugCfg)
     local hasBuds      = atHarvest and #Grow.RemainingBudIndexes(plot, drugCfg) > 0
     local waterFull    = Grow.WaterLevel(plot, drugCfg, now) >= 0.999
 
+    -- Move/Remove are house-only — admin /drugs plots stay manageable
+    -- through that admin panel so we don't surface them here.
+    local hid = plot.house_id
+    local inHouse = hid ~= nil and hid ~= "" and hid ~= "_legacy"
+    print(("[pickle_drugs] plant_scene ComputeActions: plot=%s house_id=%s zone_id=%s -> inHouse=%s")
+        :format(tostring(plot.id), tostring(hid), tostring(plot.zone_id), tostring(inHouse)))
+
     local function reason(text) return text end
 
     return {
@@ -222,6 +229,20 @@ local function ComputeActions(plot, drugCfg)
             icon = "eye",
             available = true,
             reason = nil,
+        },
+        {
+            id = "move",
+            label = "Move",
+            icon = "move",
+            available = inHouse,
+            reason = (not inHouse) and reason("Use /drugs to move admin plots") or nil,
+        },
+        {
+            id = "remove",
+            label = "Remove",
+            icon = "trash",
+            available = inHouse,
+            reason = (not inHouse) and reason("Use /drugs to remove admin plots") or nil,
         },
     }
 end
@@ -321,6 +342,10 @@ local function ReturnToMenu()
     end)
 end
 
+-- Forward-declared so StartAction's "move" / "remove" branches can call
+-- it; the body is defined below alongside the other open/close helpers.
+local ClosePlantScene
+
 local function StartAction(action)
     if not Scene or Scene.activeAction ~= "menu" then return end
     if Scene.tween then return end
@@ -334,6 +359,25 @@ local function StartAction(action)
         StartTween(InspectPose(Scene.spot, Scene.inspectAngle), TWEEN_MS, function()
             PushSnapshot()
         end)
+        return
+    end
+
+    -- Move/Remove are management actions, not in-scene mini-flows: they
+    -- close the plant scene first, then defer to housing (move) or fire
+    -- the player-facing delete (remove). Server validates authorisation.
+    if action == "move" then
+        local hid = Scene.plot and Scene.plot.house_id
+        local plotId = Scene.plotId
+        if hid then
+            ClosePlantScene()
+            TriggerEvent("pickle_drugs:movePlotInScene", plotId, hid)
+        end
+        return
+    end
+    if action == "remove" then
+        local plotId = Scene.plotId
+        ClosePlantScene()
+        TriggerServerEvent("pickle_drugs:deleteHousePlot", plotId)
         return
     end
 
@@ -434,7 +478,7 @@ function OpenPlantScene(plotId)
     StartStatusThread()
 end
 
-local function ClosePlantScene(skipFade)
+ClosePlantScene = function(skipFade)
     if not Scene then return end
     if Scene.tearingDown then return end
     Scene.tearingDown = true

@@ -80,6 +80,13 @@ RegisterNetEvent("pickle_drugs:openCreator", function()
     openCreator()
 end)
 
+-- Tab-switcher integration: when the housing admin tab swaps away from
+-- "plots", it sends a closeCreator NUI message but our local CreatorOpen
+-- flag is still set — guard the next open against the early-return.
+AddEventHandler("pickle_drugs:resetCreatorState", function()
+    CreatorOpen = false
+end)
+
 -- Plot list refresh after a server-side mutation. plotUpdate is broadcast
 -- on every gameplay state change too, so we debounce by simply re-sending
 -- the (cheap) list snapshot whenever the creator is open.

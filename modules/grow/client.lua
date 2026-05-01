@@ -406,13 +406,34 @@ local function SpotFromPlot(plot)
     }
 end
 
-RegisterNetEvent("pickle_drugs:plotUpdate", function(plot)
-    if not plot or not plot.id then return end
+--- Whether this client should render a plot, given which house we're in.
+--- Plots in `_legacy` or in any mlo-kind house are always rendered (they
+--- live in bucket 0). Plots in teleport-kind houses are only rendered
+--- when the player is bucketed into that same house — otherwise the same
+--- world coords would render N copies stacked on each other (one per
+--- isolated tenant of the shared interior template).
+local function shouldRenderPlot(plot)
+    if not Housing then return true end
+    local houseId = plot.house_id
+    if not houseId or houseId == "" or houseId == "_legacy" then return true end
+    local h = Housing.GetHouse(houseId)
+    if not h then return true end
+    if h.kind == "mlo" then return true end
+    return Housing.GetCurrentBucketHouseId() == houseId
+end
+
+local PendingPlots = {}
+
+local function applyOrDefer(plot)
     local spot = SpotFromPlot(plot)
     if not spot then return end
-    -- If coords changed (admin moved the plot), tear down the old prop
-    -- set so syncBaseProps spawns fresh at the new location instead of
-    -- moving a pot+soil that's mid-render.
+    if not shouldRenderPlot(plot) then
+        PendingPlots[plot.id] = plot
+        DespawnPlot(plot.id)
+        PlotState[plot.id] = nil
+        return
+    end
+    PendingPlots[plot.id] = nil
     local existing = PlotState[plot.id]
     if existing and existing.spot then
         local oldC, newC = existing.spot.coords, spot.coords
@@ -426,7 +447,30 @@ RegisterNetEvent("pickle_drugs:plotUpdate", function(plot)
     PlotState[plot.id].spot = spot
     PlotState[plot.id].plot = plot
     ApplyPlotState(spot, plot)
+end
+
+RegisterNetEvent("pickle_drugs:plotUpdate", function(plot)
+    if not plot or not plot.id then return end
+    applyOrDefer(plot)
 end)
+
+--- Re-evaluate render state when the player moves between buckets — what
+--- was hidden on the world side now needs to spawn (and vice versa).
+local function reevaluateAll()
+    for _, plot in pairs(PendingPlots) do
+        if shouldRenderPlot(plot) then applyOrDefer(plot) end
+    end
+    for id, s in pairs(PlotState) do
+        if s.plot and not shouldRenderPlot(s.plot) then
+            PendingPlots[id] = s.plot
+            DespawnPlot(id)
+            PlotState[id] = nil
+        end
+    end
+end
+
+RegisterNetEvent("pickle_drugs:enteredHouse", function() reevaluateAll() end)
+RegisterNetEvent("pickle_drugs:leftHouse",    function() reevaluateAll() end)
 
 RegisterNetEvent("pickle_drugs:plotRemoved", function(plotId)
     if not plotId then return end
@@ -475,7 +519,9 @@ end
 
 --- Builds the ox_target options for a plot. Reads the live plot snapshot
 --- on each canInteract so prompts hide/show automatically as the server
---- broadcasts state changes.
+--- broadcasts state changes. Move/Remove are inside the plant scene's
+--- bottom action menu rather than out here so the player doesn't have a
+--- pile of competing prompts on a single plot.
 local function BuildTargetOptions(spot, _drugCfg)
     local id = spot.id
     return {
@@ -509,8 +555,8 @@ function AttachTarget(plotId)
     end
 
     s.targetZoneId = exports.ox_target:addBoxZone({
-        coords   = vector3(s.spot.coords.x, s.spot.coords.y, s.spot.coords.z + 0.6),
-        size     = vec3(1.2, 1.2, 1.6),
+        coords   = vector3(s.spot.coords.x, s.spot.coords.y, s.spot.coords.z),
+        size     = vec3(0.5, 0.5, 1.0),
         rotation = s.spot.coords.w or 0.0,
         debug    = Config.Debug,
         options  = BuildTargetOptions(s.spot, drugCfg),
@@ -524,16 +570,7 @@ CreateThread(function()
     WaitForAllDrugModels()
     local plots = lib.callback.await("pickle_drugs:getPlots", false) or {}
     for _, plot in ipairs(plots) do
-        local spot = SpotFromPlot(plot)
-        if spot then
-            -- Preserve any entity refs already set up by a prior plotUpdate
-            -- broadcast — replacing the table here would leak the previously
-            -- spawned pot/plant and cause `syncBaseProps` to spawn doubles.
-            PlotState[plot.id] = PlotState[plot.id] or {}
-            PlotState[plot.id].spot = spot
-            PlotState[plot.id].plot = plot
-            ApplyPlotState(spot, plot)
-        end
+        applyOrDefer(plot)
     end
 end)
 

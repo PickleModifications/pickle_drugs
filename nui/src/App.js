@@ -1,11 +1,15 @@
 import { jsx as _jsx, jsxs as _jsxs, Fragment as _Fragment } from "react/jsx-runtime";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, Droplet, Eye, Leaf, Mountain, Scissors, Sprout, X, } from "lucide-react";
+import { ChevronDown, Droplet, Eye, Leaf, Mountain, Move, Scissors, Sprout, Trash2, X, } from "lucide-react";
 import { fetchNui, useNuiEvent } from "@/lib/nui";
 import { CreatorPanel } from "./CreatorPanel";
 import { EmployeesPanel } from "./EmployeesPanel";
 import { AssignerPanel } from "./AssignerPanel";
 import { EmployeeInfoPanel } from "./EmployeeInfoPanel";
+import { HousingPanel } from "./HousingPanel";
+import { HouseManagePanel } from "./HouseManagePanel";
+import { HousePlacementHud } from "./HousePlacementHud";
+import { ZonePickerHud } from "./ZonePickerHud";
 // ─── SmoothBar ────────────────────────────────────────────────────────────
 function SmoothBar({ target, className, speed = 6, }) {
     const [value, setValue] = useState(target);
@@ -69,6 +73,8 @@ const ICON_MAP = {
     droplet: Droplet,
     scissors: Scissors,
     eye: Eye,
+    move: Move,
+    trash: Trash2,
 };
 function ActionIcon({ name, className }) {
     const Comp = ICON_MAP[name] ?? Sprout;
@@ -98,6 +104,14 @@ const TONES = {
     inspect: {
         hover: "hover:bg-violet-500/25 hover:ring-violet-400/70 hover:text-violet-50 hover:shadow-[0_0_14px_-6px_rgba(167,139,250,0.7)]",
         active: "bg-violet-500/30 ring-violet-400/70 text-violet-50 shadow-[0_0_18px_-6px_rgba(167,139,250,0.75)]",
+    },
+    move: {
+        hover: "hover:bg-amber-500/25 hover:ring-amber-400/70 hover:text-amber-50 hover:shadow-[0_0_14px_-6px_rgba(251,191,36,0.7)]",
+        active: "bg-amber-500/30 ring-amber-400/70 text-amber-50 shadow-[0_0_18px_-6px_rgba(251,191,36,0.75)]",
+    },
+    remove: {
+        hover: "hover:bg-red-500/25 hover:ring-red-400/70 hover:text-red-50 hover:shadow-[0_0_14px_-6px_rgba(248,113,113,0.7)]",
+        active: "bg-red-500/30 ring-red-400/70 text-red-50 shadow-[0_0_18px_-6px_rgba(248,113,113,0.75)]",
     },
     menu: { hover: "", active: "" },
 };
@@ -187,6 +201,18 @@ function App() {
     // Employee info popup
     const [empInfoOpen, setEmpInfoOpen] = useState(false);
     const [empInfoData, setEmpInfoData] = useState(null);
+    // Housing admin
+    const [housingOpen, setHousingOpen] = useState(false);
+    const [housingHidden, setHousingHidden] = useState(false);
+    const [housingPanel, setHousingPanel] = useState("houses");
+    const [housingInitial, setHousingInitial] = useState({ interiors: [], houses: [] });
+    // Player house management
+    const [houseManageOpen, setHouseManageOpen] = useState(false);
+    const [houseManageData, setHouseManageData] = useState(null);
+    // Placement HUD
+    const [placementHud, setPlacementHud] = useState(null);
+    // Zone picker HUD (admin in-world zone bounds picker)
+    const [zonePickerHud, setZonePickerHud] = useState(null);
     const [pitcherLevel, setPitcherLevel] = useState(1.0);
     const [plantWaterLevel, setPlantWaterLevel] = useState(0.0);
     const [showPlantWater, setShowPlantWater] = useState(false);
@@ -266,6 +292,43 @@ function App() {
         setEmpInfoOpen(false);
         setEmpInfoData(null);
     });
+    // Housing admin events
+    useNuiEvent("openHousing", (data) => {
+        if (!data)
+            return;
+        setHousingPanel(data.panel ?? "houses");
+        setHousingInitial({ interiors: data.interiors ?? [], houses: data.houses ?? [] });
+        setHousingHidden(false);
+        setHousingOpen(true);
+    });
+    useNuiEvent("closeHousing", () => setHousingOpen(false));
+    useNuiEvent("housingMinimize", () => setHousingHidden(true));
+    useNuiEvent("housingRestore", (d) => {
+        setHousingHidden(false);
+        if (d?.panel)
+            setHousingPanel(d.panel);
+    });
+    // House manage panel
+    useNuiEvent("openHouseManage", (data) => {
+        if (!data)
+            return;
+        setHouseManageData(data);
+        setHouseManageOpen(true);
+    });
+    useNuiEvent("closeHouseManage", () => {
+        setHouseManageOpen(false);
+        setHouseManageData(null);
+    });
+    // Placement HUD
+    useNuiEvent("openPlacementHud", (data) => setPlacementHud(data ?? null));
+    useNuiEvent("closePlacementHud", () => setPlacementHud(null));
+    // Zone picker HUD
+    useNuiEvent("openZonePickerHud", (data) => setZonePickerHud(data ?? null));
+    useNuiEvent("updateZonePickerHud", (data) => {
+        if (data)
+            setZonePickerHud(data);
+    });
+    useNuiEvent("closeZonePickerHud", () => setZonePickerHud(null));
     useNuiEvent("closePlantScene", () => {
         setOpen(false);
         setStatus(null);
@@ -380,9 +443,25 @@ function App() {
         employeesOpen ||
         assignerOpen ||
         empInfoOpen ||
+        housingOpen ||
+        houseManageOpen ||
+        !!placementHud ||
+        !!zonePickerHud ||
         !!gizmoHelp;
     if (!anyOpen)
         return null;
+    if (housingOpen && !open) {
+        return (_jsxs(_Fragment, { children: [_jsx(HousingPanel, { initial: housingInitial, panel: housingPanel, hidden: housingHidden, onClose: () => fetchNui("housingClose") }), gizmoHelp && _jsx(GizmoHelpBar, { ...gizmoHelp }), zonePickerHud && _jsx(ZonePickerHud, { data: zonePickerHud })] }));
+    }
+    if (houseManageOpen && houseManageData && !open) {
+        return (_jsx(HouseManagePanel, { data: houseManageData, onClose: () => fetchNui("houseManageClose") }));
+    }
+    if (placementHud && !open) {
+        return _jsx(HousePlacementHud, { data: placementHud });
+    }
+    if (zonePickerHud && !open) {
+        return _jsx(ZonePickerHud, { data: zonePickerHud });
+    }
     if (creatorOpen && !open) {
         return (_jsxs(_Fragment, { children: [_jsx(CreatorPanel, { drugs: creatorDrugs, plots: creatorPlots, hidden: creatorHidden, onClose: () => fetchNui("creatorClose") }), gizmoHelp && _jsx(GizmoHelpBar, { ...gizmoHelp })] }));
     }
