@@ -479,18 +479,17 @@ local function resolveZoneAt(p, wx, wy, wz, fw, fh)
     return nil, nil, nil
 end
 
---- Snap world-space pose for a footprint of `(fw,fh)` anchored at cell
---- `(cx,cy)` of `zone`, with rotation step `rotIndex` (0..3). Returns
---- (worldX, worldY, worldZ, headingDeg).
-local function snapPoseForFootprint(zone, cx, cy, fw, fh, rotIndex)
+--- Snap world-space position for a footprint of `(fw,fh)` anchored at
+--- cell `(cx,cy)` of `zone`. Returns (worldX, worldY, worldZ); the
+--- heading lives separately and is computed via Housing.WorldHeading.
+local function snapPoseForFootprint(zone, cx, cy, fw, fh)
     local lx = (cx + fw / 2 - zone.xCells / 2) * zone.cell
     local ly = (cy + fh / 2 - zone.yCells / 2) * zone.cell
     local hRad = math.rad(zone.origin.w or 0.0)
     local cosH, sinH = math.cos(hRad), math.sin(hRad)
     local wx = zone.origin.x + cosH * lx - sinH * ly
     local wy = zone.origin.y + sinH * lx + cosH * ly
-    local heading = (rotIndex % 4) * 90.0
-    return wx, wy, zone.origin.z, heading
+    return wx, wy, zone.origin.z
 end
 
 --- Draws a flat colored quad covering the entity's footprint. Coordinates
@@ -602,11 +601,10 @@ local function placementLoop()
         local sizeX = (rotated and p.sizeY or p.sizeX) or 0.0
         local sizeY = (rotated and p.sizeX or p.sizeY) or 0.0
         if zone then
-            snapX, snapY, snapZ = snapPoseForFootprint(zone, cx, cy, fw, fh, p.rotIndex)
-            -- Heading: zone heading + rotation step. Matches what the
-            -- grow/storage create-events persist on confirm so the
-            -- preview reads identical to the final placed prop.
-            heading = (zone.origin.w or 0.0) + (p.rotIndex % 4) * 90.0
+            snapX, snapY, snapZ = snapPoseForFootprint(zone, cx, cy, fw, fh)
+            -- Heading uses the same Housing.WorldHeading helper the server
+            -- persists with, so preview pose === stored pose.
+            heading = Housing.WorldHeading(zone, p.rotIndex)
             valid = Housing.CanPlaceAt(zone, cx, cy, fw, fh, p.occupiedByZone[zone.id])
             sizeX  = fw * zone.cell
             sizeY  = fh * zone.cell
@@ -1025,15 +1023,12 @@ function Housing.MovePlot(plotId, houseId)
     local model = (drugCfg and drugCfg.placementModel) or "pickle_pot_01"
 
     -- Derive the rotIndex relative to the source zone's heading. The plot
-    -- stores absolute world heading in coords_w; placement uses 0..3 steps
-    -- relative to zone.origin.w. Round to the nearest step in case the row
-    -- predates the snap logic.
-    local zoneW = 0.0
+    -- stores absolute world heading in coords_w; placement uses 0..3 steps.
+    local sourceZone
     for _, z in ipairs(interior.zones) do
-        if z.id == target.zone_id then zoneW = z.origin and z.origin.w or 0.0 break end
+        if z.id == target.zone_id then sourceZone = z break end
     end
-    local relDeg = ((target.coords_w or 0.0) - zoneW) % 360
-    local initialRotIndex = math.floor((relDeg + 45) / 90) % 4
+    local initialRotIndex = Housing.RotIndexFromHeading(sourceZone, target.coords_w)
 
     -- Hide the live prop locally for the duration of the placement so it
     -- doesn't double up with the placement preview at the old pose. The

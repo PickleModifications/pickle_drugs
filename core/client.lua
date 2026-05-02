@@ -42,19 +42,42 @@ function PickleEntity.SafeSpawnProp(model, coords, heading, timeoutMs)
     if not model or not coords then return nil end
     local hash = LoadModel(model, timeoutMs or 4000)
     if not hash then return nil end
-    local h = heading or 0.0
+    -- Coerce to float. FiveM natives that take a float argument
+    -- (SetEntityHeading, SetEntityRotation) silently no-op if Lua hands
+    -- them an integer — which `(zoneW + rotIndex*90) % 360` produces
+    -- exactly when both sides are whole numbers (e.g. 235). The `+ 0.0`
+    -- forces the value into Lua's float subtype so the native binding
+    -- marshals it correctly.
+    local h = ((tonumber(heading) or 0.0) % 360) + 0.0
     local cx, cy, cz = coords.x, coords.y, coords.z
     if Housing and Housing.AdjustSpawnCoords then
         cx, cy, cz = Housing.AdjustSpawnCoords(model, cx, cy, cz, h)
     end
+
     local obj = CreateObject(hash, cx, cy, cz, false, false, false)
     if not obj or not DoesEntityExist(obj) then
         SetModelAsNoLongerNeeded(hash)
         return nil
     end
+
+    -- Pose order matters for stubborn prop classes (door-bearing
+    -- container props like gr_prop_gr_gunlocker_01a). The placement
+    -- preview's working sequence is collision-off → freeze → rotate,
+    -- because the engine's physics-anchor override eats rotation
+    -- writes on a live, collidable, unfrozen entity. Mirror that here:
+    -- disable collision, freeze, then rotate. We re-enable collision
+    -- after so the prop still blocks the player.
+    SetEntityCollision(obj, false, false)
+    FreezeEntityPosition(obj, true)
     SetEntityCoordsNoOffset(obj, cx, cy, cz, false, false, false)
     SetEntityHeading(obj, h)
-    FreezeEntityPosition(obj, true)
+
+    if not DoesEntityExist(obj) then
+        SetModelAsNoLongerNeeded(hash)
+        return nil
+    end
+
+    SetEntityCollision(obj, true, true)
     SetEntityInvincible(obj, true)
     SetModelAsNoLongerNeeded(hash)
     return obj

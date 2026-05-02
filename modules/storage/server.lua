@@ -11,6 +11,14 @@ local Lockers = {}      -- id → row (in-memory cache; SQL is source of truth)
 local Openers = {}      -- lockerId → src (single-opener lock)
 local PlayerLocker = {} -- src → lockerId
 
+-- Forward declaration. `snapshot` is defined further down (it depends on
+-- helpers introduced later in the file) but `Storage.AddToLocker` —
+-- called by the worker scheduler — needs to push a fresh snapshot to
+-- any open viewer when it deposits. Without this declaration the
+-- earlier reference resolves to a global nil and crashes the moment a
+-- player happens to be viewing the locker as a worker delivers.
+local snapshot
+
 local function now() return os.time() * 1000 end
 
 local function notify(src, msg, type_)
@@ -267,20 +275,21 @@ function(houseId, zoneId, kind, cx, cy, sizeX, sizeY, rotIndex)
     end
     local existing = combinedExisting(houseId, nil)
     local ok, reason, world, fw, fh = Housing.ValidatePlacement(
-        src, houseId, zoneId, cx, cy, sizeX, sizeY, existing
+        src, houseId, zoneId, cx, cy, sizeX, sizeY, rotIndex, existing
     )
     if not ok then
         notify(src, ("Can't place there (%s)"):format(reason or "?"), "error")
         return
     end
 
-    local heading = (world.w or 0.0) + rotIndex * 90.0
+    -- world.w is the final placement heading; ValidatePlacement applies
+    -- the rotIndex offset for us.
     local id = generateId(kind)
     local l = {
         id = id, kind = kind,
         house_id = houseId, zone_id = zoneId,
         cell_x = cx, cell_y = cy, cell_w = fw, cell_h = fh,
-        coords_x = world.x, coords_y = world.y, coords_z = world.z, coords_w = heading,
+        coords_x = world.x, coords_y = world.y, coords_z = world.z, coords_w = world.w,
         items = {},
         updated_at = now(),
     }
@@ -294,7 +303,7 @@ function(houseId, zoneId, kind, cx, cy, sizeX, sizeY, rotIndex)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     ]], {
         id, "storage", "", 0, 0, 0, 0, "[]",
-        world.x, world.y, world.z, heading,
+        world.x, world.y, world.z, world.w,
         houseId, zoneId, cx, cy, fw, fh,
         encodeMetadata(l), l.updated_at,
     })
@@ -326,17 +335,16 @@ function(lockerId, zoneId, cx, cy, sizeX, sizeY, rotIndex)
     end
     local existing = combinedExisting(l.house_id, lockerId)
     local ok, reason, world, fw, fh = Housing.ValidatePlacement(
-        src, l.house_id, zoneId, cx, cy, sizeX, sizeY, existing
+        src, l.house_id, zoneId, cx, cy, sizeX, sizeY, rotIndex, existing
     )
     if not ok then
         notify(src, ("Can't place there (%s)"):format(reason or "?"), "error")
         return
     end
-    local heading = (world.w or 0.0) + rotIndex * 90.0
     l.zone_id = zoneId
     l.cell_x, l.cell_y = cx, cy
     l.cell_w, l.cell_h = fw, fh
-    l.coords_x, l.coords_y, l.coords_z, l.coords_w = world.x, world.y, world.z, heading
+    l.coords_x, l.coords_y, l.coords_z, l.coords_w = world.x, world.y, world.z, world.w
     persistMeta(l)
     broadcast(l)
     notify(src, "Locker moved", "success")
@@ -385,7 +393,7 @@ local function ensureCanAccess(src, l)
     return false
 end
 
-local function snapshot(src, l)
+snapshot = function(src, l)
     local items = {}
     for slot, it in pairs(l.items or {}) do
         items[tostring(slot)] = {

@@ -208,6 +208,7 @@ RegisterNUICallback("storageTransfer", function(data, cb)
         direction = data.direction,
         fromSlot  = data.fromSlot,
         toSlot    = data.toSlot,
+        count     = data.count,
     })
 end)
 
@@ -244,12 +245,11 @@ function Storage.MoveLocker(lockerId)
     if s.prop and DoesEntityExist(s.prop) then SetEntityVisible(s.prop, false, false) end
 
     -- Recover an initial rotIndex relative to the source zone heading.
-    local zoneW = 0.0
+    local sourceZone
     for _, z in ipairs(interior.zones) do
-        if z.id == row.zone_id then zoneW = z.origin and z.origin.w or 0.0 break end
+        if z.id == row.zone_id then sourceZone = z break end
     end
-    local relDeg = ((row.coords_w or 0.0) - zoneW) % 360
-    local initialRotIndex = math.floor((relDeg + 45) / 90) % 4
+    local initialRotIndex = Housing.RotIndexFromHeading(sourceZone, row.coords_w)
 
     Housing.StartPlacement({
         houseId = houseId,

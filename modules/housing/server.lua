@@ -384,7 +384,12 @@ Housing.LapseLease = lapseLease
 ---@return table|nil  world      { x, y, z, w }
 ---@return integer|nil w
 ---@return integer|nil h
-function Housing.ValidatePlacement(src, houseId, zoneId, cx, cy, sizeX, sizeY, existing)
+--- Validates a placement and returns the final world pose. `rotIndex` is
+--- the 0..3 quarter-turn the player selected — `world.w` is returned with
+--- `Housing.WorldHeading(zone, rotIndex)` already applied, so callers
+--- never have to (and never can forget to) re-add `rotIndex * 90`.
+---@param rotIndex integer|nil  0..3, defaults to 0 for back-compat
+function Housing.ValidatePlacement(src, houseId, zoneId, cx, cy, sizeX, sizeY, rotIndex, existing)
     local h = Houses[houseId]
     if not h then return false, "no_house" end
     if not Housing.PlayerCanAccess(src, h) and not adminCheck(src) then
@@ -403,6 +408,7 @@ function Housing.ValidatePlacement(src, houseId, zoneId, cx, cy, sizeX, sizeY, e
     local ok, reason = Housing.CanPlaceAt(zone, cx, cy, fw, fh, occ)
     if not ok then return false, reason end
     local world = Housing.CellToWorld(zone, cx + (fw - 1) / 2, cy + (fh - 1) / 2)
+    world.w = Housing.WorldHeading(zone, rotIndex or 0)
     return true, nil, world, fw, fh
 end
 

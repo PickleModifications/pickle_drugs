@@ -98,6 +98,36 @@ function Housing.CellToWorld(zone, cx, cy)
     return { x = wx, y = wy, z = wz, w = zone.origin.w or 0.0 }
 end
 
+-- ─── Heading helpers ──────────────────────────────────────────────────────
+-- A placed entity's world heading is `zone.origin.w + rotIndex * 90`, where
+-- `rotIndex` is the 0..3 quarter-turn the player picked during placement.
+-- Both server (when persisting) and client (when rendering the preview, or
+-- recovering an initial rotIndex on move) must agree on this formula —
+-- centralising it here keeps the bug class "forgot to add rotIndex*90 in
+-- one of N call sites" out of the codebase.
+
+--- Final world heading (degrees) for an entity placed at `rotIndex` in `zone`.
+---@param zone table
+---@param rotIndex integer  0..3
+---@return number headingDeg
+function Housing.WorldHeading(zone, rotIndex)
+    local zoneW = (zone and zone.origin and zone.origin.w) or 0.0
+    local r = ((tonumber(rotIndex) or 0) % 4 + 4) % 4
+    return (zoneW + r * 90.0) % 360
+end
+
+--- Inverse of WorldHeading: given a stored world heading and the source
+--- zone, recover the 0..3 rotIndex. Rounds to the nearest quarter-turn so
+--- legacy rows that drifted slightly still snap cleanly.
+---@param zone table
+---@param headingDeg number
+---@return integer rotIndex
+function Housing.RotIndexFromHeading(zone, headingDeg)
+    local zoneW = (zone and zone.origin and zone.origin.w) or 0.0
+    local relDeg = (((tonumber(headingDeg) or 0.0) - zoneW) % 360 + 360) % 360
+    return math.floor((relDeg + 45) / 90) % 4
+end
+
 -- ─── Footprint ────────────────────────────────────────────────────────────
 
 --- Given model bbox extents (sizeX, sizeY in metres) and a zone, returns

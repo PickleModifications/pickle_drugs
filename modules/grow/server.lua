@@ -425,7 +425,7 @@ RegisterNetEvent("pickle_drugs:createHousePlot", function(houseId, zoneId, drug,
         end
     end
     local ok, reason, world, fw, fh = Housing.ValidatePlacement(
-        src, houseId, zoneId, cx, cy, sizeX, sizeY, existing
+        src, houseId, zoneId, cx, cy, sizeX, sizeY, rotIndex, existing
     )
     if not ok then
         if potItem and Inventory and Inventory.AddItem then
@@ -435,13 +435,12 @@ RegisterNetEvent("pickle_drugs:createHousePlot", function(houseId, zoneId, drug,
         return
     end
 
-    -- Apply the player's rotation pick (0/90/180/270 around zone heading).
-    local plotHeading = (world.w or 0.0) + rotIndex * 90.0
-
+    -- world.w is already the final placement heading (zone heading +
+    -- rotIndex*90) — Housing.ValidatePlacement applies it for us.
     local id = generatePlotId(drug)
     local plot = Grow.NewPlot({
         id = id, drug = drug,
-        coords = { x = world.x, y = world.y, z = world.z, w = plotHeading },
+        coords = { x = world.x, y = world.y, z = world.z, w = world.w },
     })
     plot.house_id = houseId
     plot.zone_id  = zoneId
@@ -519,22 +518,21 @@ RegisterNetEvent("pickle_drugs:moveHousePlot", function(plotId, zoneId, cx, cy, 
         end
     end
     local ok, reason, world, fw, fh = Housing.ValidatePlacement(
-        src, plot.house_id, zoneId, cx, cy, sizeX, sizeY, existing
+        src, plot.house_id, zoneId, cx, cy, sizeX, sizeY, rotIndex, existing
     )
     if not ok then
         notify(src, ("Can't place there (%s)"):format(reason or "?"), "error")
         return
     end
-    local plotHeading = (world.w or 0.0) + rotIndex * 90.0
 
     plot.zone_id = zoneId
     plot.cell_x, plot.cell_y = cx, cy
     plot.cell_w, plot.cell_h = fw, fh
     plot.coords_x, plot.coords_y, plot.coords_z, plot.coords_w =
-        world.x, world.y, world.z, plotHeading
+        world.x, world.y, world.z, world.w
     MySQL.update.await(
         "UPDATE pickle_drugs_entities SET zone_id=?, cell_x=?, cell_y=?, cell_w=?, cell_h=?, coords_x=?, coords_y=?, coords_z=?, coords_w=? WHERE id=?",
-        { zoneId, cx, cy, fw, fh, world.x, world.y, world.z, plotHeading, plotId }
+        { zoneId, cx, cy, fw, fh, world.x, world.y, world.z, world.w, plotId }
     )
     TriggerClientEvent("pickle_drugs:plotUpdate", -1, plot)
     notify(src, "Entity moved", "success")
