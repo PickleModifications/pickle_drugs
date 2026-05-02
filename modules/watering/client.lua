@@ -349,11 +349,10 @@ function OpenWateringScene(plotId, opts)
     local drugCfg = Config.Drugs[plot.drug]
     if not drugCfg or not drugCfg.watering then return end
 
-    if drugCfg.pitcherItem and Inventory and Inventory.GetItemCount then
-        if Inventory.GetItemCount and Inventory.GetItemCount(drugCfg.pitcherItem) < 1 then
-            return
-        end
-    end
+    -- Pre-flight item check now lives in plant_scene/client.lua's
+    -- StartAction, gated on a server-side count callback; this scene
+    -- assumes the caller has already verified the player holds the
+    -- watering pitcher.
 
     local center = vector3(spot.coords.x, spot.coords.y, spot.coords.z)
     local heading = spot.coords.w or 0.0

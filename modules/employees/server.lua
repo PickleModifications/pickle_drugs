@@ -39,6 +39,15 @@ local function normaliseHouseId(v)
     return v
 end
 
+local function jsonDecodeObject(s)
+    if type(s) ~= "string" or s == "" then
+        return type(s) == "table" and s or {}
+    end
+    local ok, v = pcall(json.decode, s)
+    if ok and type(v) == "table" then return v end
+    return {}
+end
+
 local function rowFromDb(row)
     return {
         id              = row.id,
@@ -51,15 +60,15 @@ local function rowFromDb(row)
         home_w          = tonumber(row.home_w) or 0,
         assigned_plots  = jsonDecodeArray(row.assigned_plots),
         house_id        = normaliseHouseId(row.house_id),
+        -- carry: { lockerId | "_unrouted" → { itemName → count } }
+        carry           = jsonDecodeObject(row.inventory),
         updated_at      = tonumber(row.updated_at) or 0,
     }
 end
 
---- Returns the world-space "home" coords for an employee, falling back to
---- the bound house's interior idle point if the employee was created
---- through a house and has no explicit home_*. Per-house workers idle
---- inside their interior (in the house's bucket); legacy employees stay
---- at their world coords.
+--- Returns the world-space "home" coords for an employee — the bound
+--- house's interior idle point. Workers idle inside their interior in
+--- the house's bucket.
 local function effectiveHome(emp)
     if emp.house_id and Housing and Housing.GetHouse then
         local h = Housing.GetHouse(emp.house_id)
@@ -101,7 +110,18 @@ end
 local function LoadEmployees()
     local rows = MySQL.query.await("SELECT * FROM pickle_drugs_employees") or {}
     for _, row in ipairs(rows) do
-        Roster[row.id] = rowFromDb(row)
+        local emp = rowFromDb(row)
+        -- Discard any leftover unrouted carry. Earlier builds let
+        -- workers harvest plots without an output destination, parking
+        -- the buds under "_unrouted" — which has no deposit target, so
+        -- those items would jam the bag at the cap forever. Workers
+        -- now refuse to harvest unrouted plots; clearing existing junk
+        -- here unlocks any previously-stuck workers on first boot
+        -- after the upgrade.
+        if emp.carry and emp.carry["_unrouted"] then
+            emp.carry["_unrouted"] = nil
+        end
+        Roster[row.id] = emp
         EmployeeState[row.id] = { state = "idle", cooldownUntil = 0 }
     end
     debugPrint(("employees: loaded %d"):format(#rows))
@@ -110,16 +130,79 @@ end
 local function PersistEmployee(emp)
     emp.updated_at = now()
     MySQL.update.await(
-        "UPDATE pickle_drugs_employees SET model=?, first_name=?, last_name=?, home_x=?, home_y=?, home_z=?, home_w=?, assigned_plots=?, house_id=?, updated_at=? WHERE id=?",
+        "UPDATE pickle_drugs_employees SET model=?, first_name=?, last_name=?, home_x=?, home_y=?, home_z=?, home_w=?, assigned_plots=?, house_id=?, inventory=?, updated_at=? WHERE id=?",
         {
             emp.model, emp.first_name, emp.last_name,
             emp.home_x, emp.home_y, emp.home_z, emp.home_w,
             json.encode(emp.assigned_plots or {}),
             emp.house_id,
+            json.encode(emp.carry or {}),
             emp.updated_at,
             emp.id,
         }
     )
+end
+
+-- ─── Worker carry-bag ─────────────────────────────────────────────────────
+
+local UNROUTED = "_unrouted"
+
+local function totalCarry(emp)
+    local n = 0
+    for _, items in pairs(emp.carry or {}) do
+        for _, c in pairs(items) do n = n + (tonumber(c) or 0) end
+    end
+    return n
+end
+
+local function carryCapacity()
+    return tonumber((Config.Employees and Config.Employees.carryCapacity) or 25) or 25
+end
+
+function Employees.IsCarryFull(emp)
+    return totalCarry(emp) >= carryCapacity()
+end
+
+function Employees.AddToCarry(emp, item, count, lockerId)
+    if not item or (tonumber(count) or 0) <= 0 then return 0 end
+    -- Refuse routes without a destination — pickNextWorkPlot already
+    -- gates harvest on output_locker_id, but enforce here too so any
+    -- future caller can't sneak items into a bucket the deposit cycle
+    -- would never drain.
+    if type(lockerId) ~= "string" or lockerId == "" then return 0 end
+    local cap   = carryCapacity()
+    local held  = totalCarry(emp)
+    local space = math.max(0, cap - held)
+    if space <= 0 then return 0 end
+    local taken = math.min(space, tonumber(count) or 0)
+    emp.carry = emp.carry or {}
+    emp.carry[lockerId] = emp.carry[lockerId] or {}
+    emp.carry[lockerId][item] = (emp.carry[lockerId][item] or 0) + taken
+    return taken
+end
+
+--- Returns a list of locker ids the worker has unspilled items for.
+function Employees.PendingDestinations(emp)
+    local out = {}
+    for k, items in pairs(emp.carry or {}) do
+        if k ~= UNROUTED then
+            for _, c in pairs(items) do
+                if (tonumber(c) or 0) > 0 then
+                    out[#out + 1] = k
+                    break
+                end
+            end
+        end
+    end
+    return out
+end
+
+--- Removes the bucket for a given locker id, returns the items table.
+function Employees.PopBucket(emp, lockerId)
+    if not emp.carry or not lockerId then return {} end
+    local items = emp.carry[lockerId]
+    emp.carry[lockerId] = nil
+    return items or {}
 end
 
 local function SyncEmployee(emp)
@@ -195,61 +278,6 @@ local function notify(src, msg, type_)
     TriggerClientEvent("ox_lib:notify", src,
         { title = "Employees", description = msg, type = type_ or "inform" })
 end
-
-RegisterNetEvent("pickle_drugs:createEmployee", function(model, firstName, lastName, x, y, z, w)
-    local src = source
-    if not adminCheck(src) then return end
-    if type(model) ~= "string" or model == "" then notify(src, "Bad model", "error") return end
-    if type(firstName) ~= "string" or firstName == "" then notify(src, "Need first name", "error") return end
-    if type(lastName)  ~= "string" or lastName  == "" then notify(src, "Need last name",  "error") return end
-    x = tonumber(x); y = tonumber(y); z = tonumber(z); w = tonumber(w) or 0.0
-    if not x or not y or not z then notify(src, "Bad coords", "error") return end
-
-    local id = generateEmployeeId()
-    local emp = {
-        id = id, model = model, first_name = firstName, last_name = lastName,
-        home_x = x, home_y = y, home_z = z, home_w = w,
-        assigned_plots = {}, updated_at = now(),
-    }
-    Roster[id] = emp
-    EmployeeState[id] = { state = "idle", cooldownUntil = 0 }
-
-    MySQL.insert.await(
-        "INSERT INTO pickle_drugs_employees (id, model, first_name, last_name, home_x, home_y, home_z, home_w, assigned_plots, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-        { id, model, firstName, lastName, x, y, z, w, "[]", emp.updated_at }
-    )
-    TriggerClientEvent("pickle_drugs:employeeUpdate", -1, emp)
-    -- Initial idle task so freshly-spawned local peds park at home.
-    broadcastTask(emp, makeIdleTask(emp))
-    notify(src, ("Employee %s %s created"):format(firstName, lastName), "success")
-end)
-
-RegisterNetEvent("pickle_drugs:updateEmployeeCoords", function(empId, x, y, z, w)
-    local src = source
-    if not adminCheck(src) then return end
-    local emp = Roster[empId]
-    if not emp then return end
-    x = tonumber(x); y = tonumber(y); z = tonumber(z); w = tonumber(w) or 0.0
-    if not x or not y or not z then return end
-    emp.home_x, emp.home_y, emp.home_z, emp.home_w = x, y, z, w
-    SyncEmployee(emp)
-    -- Reset to idle at the new home so the schedule restarts cleanly.
-    EmployeeState[empId] = { state = "idle", cooldownUntil = 0 }
-    broadcastTask(emp, makeIdleTask(emp))
-    notify(src, "Employee moved", "success")
-end)
-
-RegisterNetEvent("pickle_drugs:deleteEmployee", function(empId)
-    local src = source
-    if not adminCheck(src) then return end
-    if not Roster[empId] then return end
-    Roster[empId] = nil
-    EmployeeState[empId] = nil
-    CurrentTask[empId] = nil
-    MySQL.update.await("DELETE FROM pickle_drugs_employees WHERE id=?", { empId })
-    TriggerClientEvent("pickle_drugs:employeeRemoved", -1, empId)
-    notify(src, "Employee dismissed", "success")
-end)
 
 RegisterNetEvent("pickle_drugs:assignPlots", function(empId, plotIds)
     local src = source
@@ -360,7 +388,7 @@ local function empCfg(key, fallback)
 end
 
 --- Per-action work duration. `Config.Employees.workMs` may be a number
---- (legacy / global) or a table `{ default = ms, soil = ms, ... }`.
+--- (global) or a table `{ default = ms, soil = ms, ... }`.
 local function workMsFor(action)
     local v = empCfg("workMs", 4500)
     local resolved
@@ -403,6 +431,26 @@ local function workSpotOf(plot)
     return { x = wx, y = wy, z = wz, facing = facing }
 end
 
+--- Same idea as workSpotOf, but for a locker. The scheduler used to walk
+--- the ped straight to the locker's footprint centre — which lands them
+--- on top of / inside the prop, with the deposit animation playing
+--- through the model. Apply the standard `workOffset` rotated by the
+--- locker's heading so the ped stops in front of the locker and faces
+--- it instead.
+local function lockerWorkSpot(coords)
+    if not coords then return nil end
+    local off = empCfg("workOffset", vector3(0.0, 1.0, 0.0))
+    local ox, oy, oz = off.x or 0.0, off.y or 0.0, off.z or 0.0
+    local hRad = math.rad(coords.w or 0.0)
+    local sinH, cosH = math.sin(hRad), math.cos(hRad)
+    local wx = coords.x + cosH * ox - sinH * oy
+    local wy = coords.y + sinH * ox + cosH * oy
+    local wz = coords.z + oz
+    local dx, dy = coords.x - wx, coords.y - wy
+    local facing = math.deg(math.atan2(-dx, dy))
+    return { x = wx, y = wy, z = wz, facing = facing }
+end
+
 local function walkDuration(fromXYZ, toXYZ)
     local d = distance3(fromXYZ, toXYZ)
     local ms = math.floor((d / empCfg("walkSpeedMps", 1.5)) * 1000)
@@ -432,12 +480,27 @@ local function pickNextWorkPlot(emp)
     local hx, hy, hz = effectiveHome(emp)
     local origin = { x = hx, y = hy, z = hz }
     local bestId, bestAction, bestBud, bestDist
+    -- A full bag means harvest actions are unworkable until the worker
+    -- has dumped into a locker. Soil/plant/water still go ahead.
+    local skipHarvest = Employees.IsCarryFull(emp)
     for _, pid in ipairs(plotPoolFor(emp)) do
         local plot = Grow.GetServerPlot(pid)
         if plot then
             local drugCfg = Config.Drugs[plot.drug]
             Grow.ResolveStage(plot, drugCfg, nowMs)
             local action, budIdx = Grow.NextEmployeeAction(plot, drugCfg, nowMs)
+            -- Harvest is only valid when:
+            --   1. the worker's carry-bag has space, AND
+            --   2. the plot has an output locker assigned. Without (2)
+            --      the harvested item would have nowhere to deposit and
+            --      would fill the bag indefinitely (the deposit cycle
+            --      ignores unrouted buckets), so we'd lock the worker
+            --      into idle as soon as the cap was reached.
+            if action == "harvest" then
+                if skipHarvest or not plot.output_locker_id then
+                    action = nil
+                end
+            end
             if action then
                 local d = distance3(origin, plotPos(plot))
                 if not bestDist or d < bestDist then
@@ -462,7 +525,22 @@ local function performAction(emp, plotId, action, budIndex)
     elseif action == "harvest" then ok = Grow.PerformCutBud(plot, drugCfg, budIndex)
     end
 
-    if ok then Grow.SyncServerPlot(plot, true) end
+    if ok then
+        Grow.SyncServerPlot(plot, true)
+        -- Harvest routes the bud into the worker's carry-bag instead of
+        -- giving it to the player. Drug definitions name the harvest item
+        -- on `cutting.harvestItem`. Plots tagged with an output_locker_id
+        -- get bucketed under that locker so the deposit cycle knows where
+        -- to dump. Plots without a destination accumulate under the
+        -- "_unrouted" bucket and stay with the worker.
+        if action == "harvest" then
+            local item = drugCfg.cutting and drugCfg.cutting.harvestItem
+            if item then
+                Employees.AddToCarry(emp, item, 1, plot.output_locker_id)
+                SyncEmployee(emp)
+            end
+        end
+    end
     return ok
 end
 
@@ -486,6 +564,32 @@ local function startWorking(emp, s, plot, nowMs)
     })
 end
 
+--- Transition an employee from going_to_locker → depositing at the
+--- supplied time. Centralised so both the natural deadline path and
+--- the client's early arrival signal go through the same broadcast.
+--- Returns true if the transition succeeded; false if the locker has
+--- vanished (caller resets to idle).
+local function startDepositing(emp, s, nowMs)
+    local lockerId = s.depositLockerId
+    local coords = lockerId and Storage and Storage.LockerCoords
+        and Storage.LockerCoords(lockerId) or nil
+    local spot = lockerWorkSpot(coords)
+    if not spot then return false end
+    s.state        = "depositing"
+    s.taskDeadline = nowMs + workMsFor("deposit")
+    s.lastPos      = { x = spot.x, y = spot.y, z = spot.z }
+    broadcastTask(emp, {
+        empId    = emp.id,
+        kind     = "work",
+        target   = { x = spot.x, y = spot.y, z = spot.z, facing = spot.facing },
+        plotId   = nil,
+        anim     = empCfg("mechanicAnim", nil),
+        scenario = empCfg("mechanicScenario", nil),
+        deadline = s.taskDeadline,
+    })
+    return true
+end
+
 --- Client-side trigger when the ped reaches the work spot ahead of the
 --- server's walk deadline. Validates the employee is still walking to
 --- the plot id the client claims, then advances immediately.
@@ -497,6 +601,24 @@ RegisterNetEvent("pickle_drugs:employeeArrivedAtPlot", function(empId, plotId)
     local plot = Grow.GetServerPlot(plotId)
     if not plot then return end
     startWorking(emp, s, plot, now())
+end)
+
+--- Same shape as employeeArrivedAtPlot but for the deposit cycle. The
+--- client polls distance to the locker work spot and fires this when
+--- close enough so the deposit anim doesn't wait on the walk-min floor.
+RegisterNetEvent("pickle_drugs:employeeArrivedAtLocker", function(empId, lockerId)
+    local emp = Roster[empId]
+    local s   = EmployeeState[empId]
+    if not emp or not s then return end
+    if s.state ~= "going_to_locker" or s.depositLockerId ~= lockerId then return end
+    if not startDepositing(emp, s, now()) then
+        -- Locker vanished mid-walk. Drop bucket and idle.
+        if lockerId then Employees.PopBucket(emp, lockerId) end
+        SyncEmployee(emp)
+        s.state = "idle"
+        s.depositLockerId = nil
+        s.cooldownUntil = now() + empCfg("cooldownMs", 1000)
+    end
 end)
 
 CreateThread(function()
@@ -529,19 +651,17 @@ CreateThread(function()
         for _, emp in pairs(Roster) do
             if not emp.house_id or emp.house_id == "" then
                 for _, h in pairs(Housing.GetAllHouses() or {}) do
-                    if h.id ~= "_legacy" then
-                        local interior = Housing.GetInterior(h.interior_id)
-                        if interior
-                           and near(interior.idle_x, emp.home_x)
-                           and near(interior.idle_y, emp.home_y)
-                           and near(interior.idle_z, emp.home_z)
-                        then
-                            emp.house_id = h.id
-                            PersistEmployee(emp)
-                            TriggerClientEvent("pickle_drugs:employeeUpdate", -1, emp)
-                            rebound = rebound + 1
-                            break
-                        end
+                    local interior = Housing.GetInterior(h.interior_id)
+                    if interior
+                       and near(interior.idle_x, emp.home_x)
+                       and near(interior.idle_y, emp.home_y)
+                       and near(interior.idle_z, emp.home_z)
+                    then
+                        emp.house_id = h.id
+                        PersistEmployee(emp)
+                        TriggerClientEvent("pickle_drugs:employeeUpdate", -1, emp)
+                        rebound = rebound + 1
+                        break
                     end
                 end
             end
@@ -550,6 +670,77 @@ CreateThread(function()
             print(("[pickle_drugs] employees: rebound %d unbound worker(s) to their house"):format(rebound))
         end
     end
+    -- Workers must belong to a real house — there's no admin / standalone
+    -- create path any more. After the rebind pass, anything still without
+    -- a valid house_id is an orphan and gets removed.
+    if Housing and Housing.GetHouse then
+        local removed = 0
+        for empId, emp in pairs(Roster) do
+            local owner = emp.house_id and Housing.GetHouse(emp.house_id) or nil
+            if not owner then
+                Roster[empId] = nil
+                EmployeeState[empId] = nil
+                CurrentTask[empId] = nil
+                MySQL.update.await("DELETE FROM pickle_drugs_employees WHERE id=?", { empId })
+                TriggerClientEvent("pickle_drugs:employeeRemoved", -1, empId)
+                removed = removed + 1
+            end
+        end
+        if removed > 0 then
+            print(("[pickle_drugs] employees: removed %d orphan worker(s) (no house)"):format(removed))
+        end
+    end
+    --- Begins (or continues) a deposit cycle for the worker if they hold
+    --- routed items. Returns true if the worker is now walking to a
+    --- locker; false if there's nothing to dump.
+    local function maybeStartDeposit(emp, s, nowMs)
+        local destinations = Employees.PendingDestinations(emp)
+        if #destinations == 0 then return false end
+        -- Pick the closest configured locker. Storage knows its coords.
+        local hx, hy, hz = effectiveHome(emp)
+        local origin = s.lastPos or { x = hx, y = hy, z = hz }
+        local bestId, bestSpot, bestDist
+        for _, lid in ipairs(destinations) do
+            local coords = Storage and Storage.LockerCoords and Storage.LockerCoords(lid)
+            local spot   = lockerWorkSpot(coords)
+            if spot then
+                local d = distance3(origin, spot)
+                if not bestDist or d < bestDist then
+                    bestId, bestSpot, bestDist = lid, spot, d
+                end
+            elseif not coords then
+                -- Locker no longer exists — drop the bucket so the worker
+                -- doesn't sit hoarding items destined nowhere.
+                Employees.PopBucket(emp, lid)
+            end
+        end
+        if not bestId then
+            SyncEmployee(emp)
+            return false
+        end
+        local target = { x = bestSpot.x, y = bestSpot.y, z = bestSpot.z, facing = bestSpot.facing }
+        local walkMs = walkDuration(origin, target)
+        s.state          = "going_to_locker"
+        s.depositLockerId = bestId
+        s.taskDeadline   = nowMs + walkMs
+        s.atPlotId       = nil
+        broadcastTask(emp, {
+            empId      = emp.id,
+            kind       = "goto",
+            target     = target,
+            plotId     = nil,
+            -- Tells the client to fire pickle_drugs:employeeArrivedAtLocker
+            -- the moment the ped is within arriveDistance of the spot,
+            -- so the deposit anim starts without waiting for the
+            -- walk-min floor (parity with the plot goto path).
+            lockerId   = bestId,
+            anim       = nil,
+            deadline   = s.taskDeadline,
+            durationMs = walkMs,
+        })
+        return true
+    end
+
     while true do
         Wait(500)
         local nowMs = now()
@@ -558,8 +749,23 @@ CreateThread(function()
             if s then
                 if s.state == "idle" then
                     if (s.cooldownUntil or 0) <= nowMs then
-                        local pid, action, bud = pickNextWorkPlot(emp)
-                        if pid then
+                        -- Carry full → deposit before any more work. The
+                        -- pickNextWorkPlot path already skips harvest
+                        -- when full; this catches the case where there's
+                        -- still soil/water/plant work and we'd otherwise
+                        -- march on forever without dumping.
+                        local startedDeposit = false
+                        if Employees.IsCarryFull(emp) then
+                            startedDeposit = maybeStartDeposit(emp, s, nowMs)
+                        end
+                        local pid, action, bud
+                        if not startedDeposit then
+                            pid, action, bud = pickNextWorkPlot(emp)
+                        end
+                        if startedDeposit then
+                            -- Already dispatched by maybeStartDeposit;
+                            -- skip the rest of the idle branch.
+                        elseif pid then
                             local plot = Grow.GetServerPlot(pid)
                             local hx, hy, hz = effectiveHome(emp)
                             local origin = { x = hx, y = hy, z = hz }
@@ -594,24 +800,69 @@ CreateThread(function()
                                 })
                             end
                         else
-                            local hx, hy, hz, hw = effectiveHome(emp)
-                            if s.lastPos and distance3(s.lastPos, { x = hx, y = hy, z = hz }) > 3.0 then
-                            -- Nothing to do but ped wandered; send back home.
-                            local target = { x = hx, y = hy, z = hz, w = hw }
-                            local walkMs = walkDuration(s.lastPos, target)
-                            s.state        = "returning"
-                            s.taskDeadline = nowMs + walkMs
-                            broadcastTask(emp, {
-                                empId      = empId,
-                                kind       = "return",
-                                target     = target,
-                                plotId     = nil,
-                                anim       = nil,
-                                deadline   = s.taskDeadline,
-                                durationMs = walkMs,
-                            })
+                            -- No more work to do. If the worker is still
+                            -- holding routed items, dump them before
+                            -- going home — "done with their task" is the
+                            -- second trigger for the deposit cycle.
+                            if maybeStartDeposit(emp, s, nowMs) then
+                                -- Dispatched. Wait for the next tick.
+                            else
+                                local hx, hy, hz, hw = effectiveHome(emp)
+                                if s.lastPos and distance3(s.lastPos, { x = hx, y = hy, z = hz }) > 3.0 then
+                                    -- Nothing to do but ped wandered; send back home.
+                                    local target = { x = hx, y = hy, z = hz, w = hw }
+                                    local walkMs = walkDuration(s.lastPos, target)
+                                    s.state        = "returning"
+                                    s.taskDeadline = nowMs + walkMs
+                                    broadcastTask(emp, {
+                                        empId      = empId,
+                                        kind       = "return",
+                                        target     = target,
+                                        plotId     = nil,
+                                        anim       = nil,
+                                        deadline   = s.taskDeadline,
+                                        durationMs = walkMs,
+                                    })
+                                end
                             end
                         end
+                    end
+                elseif s.state == "going_to_locker" then
+                    if nowMs >= (s.taskDeadline or 0) then
+                        -- Walk deadline elapsed without an arrival
+                        -- signal. Drive the same transition the client
+                        -- ping would have triggered.
+                        if not startDepositing(emp, s, nowMs) then
+                            local lockerId = s.depositLockerId
+                            if lockerId then Employees.PopBucket(emp, lockerId) end
+                            SyncEmployee(emp)
+                            s.state = "idle"
+                            s.depositLockerId = nil
+                            s.cooldownUntil = nowMs + empCfg("cooldownMs", 1000)
+                        end
+                    end
+                elseif s.state == "depositing" then
+                    if nowMs >= (s.taskDeadline or 0) then
+                        local lockerId = s.depositLockerId
+                        if lockerId and Storage and Storage.AddToLocker then
+                            local items = Employees.PopBucket(emp, lockerId)
+                            for itemName, count in pairs(items) do
+                                local _, leftover = Storage.AddToLocker(
+                                    lockerId, itemName, count, nil)
+                                if leftover and leftover > 0 then
+                                    -- Locker hit cap. Keep the leftover
+                                    -- in the worker's bucket so the next
+                                    -- deposit cycle can try again (or a
+                                    -- different locker if the player
+                                    -- reroutes).
+                                    Employees.AddToCarry(emp, itemName, leftover, lockerId)
+                                end
+                            end
+                            SyncEmployee(emp)
+                        end
+                        s.state           = "idle"
+                        s.depositLockerId = nil
+                        s.cooldownUntil   = nowMs + empCfg("cooldownMs", 1000)
                     end
                 elseif s.state == "going" then
                     if nowMs >= (s.taskDeadline or 0) then
@@ -667,14 +918,23 @@ CreateThread(function()
                     updated_at      BIGINT       NOT NULL DEFAULT 0
                 )
             ]])
-            -- Housing migration: house_id binds an employee to a house;
-            -- legacy employees keep it NULL and idle at world coords.
+            -- Housing migration: house_id binds an employee to a house.
             local cols = MySQL.query.await(
-                "SHOW COLUMNS FROM pickle_drugs_employees WHERE Field = 'house_id'"
+                "SHOW COLUMNS FROM pickle_drugs_employees WHERE Field IN ('house_id','inventory')"
             ) or {}
-            if #cols == 0 then
+            local has = {}
+            for _, c in ipairs(cols) do has[c.Field] = true end
+            if not has.house_id then
                 MySQL.query.await(
                     "ALTER TABLE pickle_drugs_employees ADD COLUMN house_id VARCHAR(64) NULL"
+                )
+            end
+            -- Worker carry-bag. JSON keyed by destination locker id →
+            -- { itemName → count }. Items without a routing target live
+            -- under the literal key "_unrouted".
+            if not has.inventory then
+                MySQL.query.await(
+                    "ALTER TABLE pickle_drugs_employees ADD COLUMN inventory LONGTEXT NULL"
                 )
             end
             LoadEmployees()
@@ -706,6 +966,31 @@ CreateThread(function()
 end)
 
 -- ─── House-bound employee API ─────────────────────────────────────────────
+
+--- Aborts any worker that is currently going to / working on the given
+--- plot, reverting them to idle and broadcasting an idle task. Called
+--- by grow when a plot is being moved or removed so the worker doesn't
+--- keep marching toward a stale pose or finish a stale work cycle.
+function Employees.AbortPlot(plotId)
+    if not plotId then return end
+    for id, emp in pairs(Roster) do
+        if type(emp) == "table" then
+            local s = EmployeeState[id]
+            if s and s.currentPlotId == plotId then
+                s.state          = "idle"
+                s.taskDeadline   = nil
+                s.currentPlotId  = nil
+                s.currentAction  = nil
+                s.currentBudIndex = nil
+                s.atPlotId       = nil
+                s.cooldownUntil  = (now()) + 250
+                local idle = makeIdleTask(emp)
+                CurrentTask[id] = idle
+                TriggerClientEvent("pickle_drugs:employeeTask", -1, idle)
+            end
+        end
+    end
+end
 
 --- Called by Housing when a lease lapses. Despawn (delete from roster) any
 --- employees bound to the house — their idle target is gone (the bucket is
@@ -745,28 +1030,20 @@ RegisterNetEvent("pickle_drugs:createHouseEmployee", function(houseId, model, fi
     local iz = interior and interior.idle_z or 0
     local iw = interior and interior.idle_w or 0
 
-    -- Seed the assignment with every plot that already exists in the
-    -- house at hire time so the day-one experience matches the old
-    -- "house workers tend everything" behaviour. New plots placed
-    -- afterwards stay unassigned until the owner opts them in via the
-    -- /employees assigner — that's the explicit-only contract.
-    local seeded = {}
-    if Grow and Grow.PlotsForHouse then
-        for _, p in ipairs(Grow.PlotsForHouse(houseId)) do
-            seeded[#seeded + 1] = p.id
-        end
-    end
+    -- New hires start with no plots assigned. The owner opts each plot
+    -- in via the assigner so a fresh worker doesn't immediately march
+    -- around tending everything before the owner has set their cadence.
     local id = generateEmployeeId()
     local emp = {
         id = id, model = model, first_name = firstName, last_name = lastName,
         home_x = ix, home_y = iy, home_z = iz, home_w = iw,
-        assigned_plots = seeded, house_id = houseId, updated_at = now(),
+        assigned_plots = {}, house_id = houseId, updated_at = now(),
     }
     Roster[id] = emp
     EmployeeState[id] = { state = "idle", cooldownUntil = 0 }
     MySQL.insert.await(
         "INSERT INTO pickle_drugs_employees (id, model, first_name, last_name, home_x, home_y, home_z, home_w, assigned_plots, house_id, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-        { id, model, firstName, lastName, ix, iy, iz, iw, json.encode(seeded), houseId, emp.updated_at }
+        { id, model, firstName, lastName, ix, iy, iz, iw, "[]", houseId, emp.updated_at }
     )
     TriggerClientEvent("pickle_drugs:employeeUpdate", -1, emp)
     broadcastTask(emp, makeIdleTask(emp))
@@ -796,6 +1073,9 @@ lib.callback.register("pickle_drugs:listHouseEmployees", function(_src, houseId)
                 id = emp.id, model = emp.model,
                 firstName = emp.first_name, lastName = emp.last_name,
                 houseId = emp.house_id,
+                carry = emp.carry or {},
+                carryTotal = totalCarry(emp),
+                carryCap   = carryCapacity(),
             }
         end
     end

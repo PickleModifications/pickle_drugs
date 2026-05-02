@@ -9,16 +9,19 @@
 // remain visible via the Lua-side preview layer) but pointer-events are
 // disabled until they re-enter edit mode.
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
-    Plus, Trash2, X, MapPin, Save, Building, Layers,
-    ArrowLeft, Footprints, Pencil, Hexagon,
+    Plus, Trash2, X, MapPin, Building, Layers,
+    ArrowLeft, Footprints, Pencil, Hexagon, Handshake,
 } from "lucide-react";
 
 import { fetchNui, useNuiEvent } from "@/lib/nui";
+import { DealingPanel } from "./dealing/DealingPanel";
 
-function DrugsTabBar({ active }: { active: "houses" | "interiors" }) {
-    const tab = (id: "houses" | "interiors", label: string, Icon: React.ElementType) => {
+export type DrugsTab = "houses" | "interiors" | "dealing";
+
+function DrugsTabBar({ active }: { active: DrugsTab }) {
+    const tab = (id: DrugsTab, label: string, Icon: React.ElementType) => {
         const isActive = active === id;
         return (
             <button
@@ -39,6 +42,7 @@ function DrugsTabBar({ active }: { active: "houses" | "interiors" }) {
         <div className="flex items-center justify-center gap-1">
             {tab("houses", "Properties", Building)}
             {tab("interiors", "Interiors", Layers)}
+            {tab("dealing", "Dealing", Handshake)}
         </div>
     );
 }
@@ -167,10 +171,45 @@ function PointEditor({
     );
 }
 
+// ─── Save status pill ────────────────────────────────────────────────────
+
+type SaveStatus = "idle" | "pending" | "saved";
+
+function SaveStatusPill({ status, warn }: { status: SaveStatus; warn?: string }) {
+    if (warn) {
+        return (
+            <span className="flex-1 px-2.5 py-1.5 inline-flex items-center justify-center gap-1.5 rounded-md ring-1 ring-amber-400/40 bg-amber-500/10 text-amber-100/80 text-[11px]">
+                {warn}
+            </span>
+        );
+    }
+    if (status === "pending") {
+        return (
+            <span className="flex-1 px-2.5 py-1.5 inline-flex items-center justify-center gap-1.5 rounded-md ring-1 ring-amber-400/40 bg-amber-500/10 text-amber-100/80 text-[11px]">
+                <span className="h-1.5 w-1.5 rounded-full bg-amber-300/80 animate-pulse" />
+                Saving…
+            </span>
+        );
+    }
+    if (status === "saved") {
+        return (
+            <span className="flex-1 px-2.5 py-1.5 inline-flex items-center justify-center gap-1.5 rounded-md ring-1 ring-emerald-400/40 bg-emerald-500/10 text-emerald-100/85 text-[11px]">
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-300/80" />
+                Saved
+            </span>
+        );
+    }
+    return (
+        <span className="flex-1 px-2.5 py-1.5 inline-flex items-center justify-center gap-1.5 rounded-md ring-1 ring-white/15 text-white/45 text-[11px]">
+            Auto-save on
+        </span>
+    );
+}
+
 // ─── Interior editor (inline, columnar) ─────────────────────────────────
 
 function InteriorEditor({
-    initial, onClose, onSaved,
+    initial, onClose, onSaved: _onSaved,
 }: {
     initial: Interior;
     onClose: () => void;
@@ -179,6 +218,10 @@ function InteriorEditor({
     // Interior templates are teleport-only; MLOs are now configured
     // inline on a Property and never live in this list.
     const [draft, setDraft] = useState<Interior>({ ...initial, kind: "teleport" });
+    const [saveStatus, setSaveStatus] = useState<"idle" | "pending" | "saved">("idle");
+    const firstMount = useRef(true);
+    const saveTimer = useRef<number | null>(null);
+    const savedFlash = useRef<number | null>(null);
     const update = (patch: Partial<Interior>) =>
         setDraft((d) => ({ ...d, ...patch }));
 
@@ -195,6 +238,48 @@ function InteriorEditor({
         fetchNui("housingSetPreview", { points, zones });
     }, [draft]);
     useEffect(() => () => { fetchNui("housingClearPreview", {}); }, []);
+
+    // Debounced auto-save. Skips the initial mount so loading the draft
+    // doesn't immediately save it, and skips entirely while the draft
+    // has no server-assigned id (a brand new template waits for the
+    // admin to click "Create" so the row gets a proper id).
+    useEffect(() => {
+        if (firstMount.current) {
+            firstMount.current = false;
+            return;
+        }
+        if (!draft.id) {
+            setSaveStatus("idle");
+            return;
+        }
+        setSaveStatus("pending");
+        if (saveTimer.current) window.clearTimeout(saveTimer.current);
+        saveTimer.current = window.setTimeout(() => {
+            fetchNui("housingSaveInterior", { payload: draft });
+            setSaveStatus("saved");
+            if (savedFlash.current) window.clearTimeout(savedFlash.current);
+            savedFlash.current = window.setTimeout(() => setSaveStatus("idle"), 1500);
+        }, 600);
+        return () => {
+            if (saveTimer.current) window.clearTimeout(saveTimer.current);
+        };
+    }, [draft]);
+
+    // Server echoes the assigned id after the first save so the editor
+    // can adopt it and stop submitting payload.id="".
+    useNuiEvent<{ tempId: string; savedId: string }>("interiorSaved", (d) => {
+        if (!d) return;
+        if (!draft.id && d.tempId === "") {
+            setDraft((cur) => ({ ...cur, id: d.savedId }));
+        }
+    });
+
+    const createNow = () => {
+        // Manual create: same payload as auto-save, but lets us flip
+        // the editor into edit-mode immediately on response.
+        fetchNui("housingSaveInterior", { payload: draft });
+        setSaveStatus("pending");
+    };
 
     useNuiEvent<{ zoneIndex: number; area: { origin: Vec4; xCells: number; yCells: number; cell: number } | null }>(
         "housingZoneAreaPicked",
@@ -230,11 +315,6 @@ function InteriorEditor({
     const removeZone = (i: number) =>
         setDraft((d) => ({ ...d, zones: d.zones.filter((_, idx) => idx !== i) }));
 
-    const save = () => {
-        fetchNui("housingSaveInterior", { payload: draft });
-        onSaved();
-    };
-
     return (
         <div className="grid grid-cols-[260px_minmax(0,1fr)_minmax(0,1fr)] gap-3 h-full min-h-0">
             {/* Column 1 — meta */}
@@ -247,17 +327,21 @@ function InteriorEditor({
                 </label>
                 <div className="text-[10px] text-white/40 italic leading-snug">
                     Interior templates are reusable bucketed interiors. MLOs are
-                    configured per-property, not here.
+                    configured per-property, not here. Changes save automatically.
                 </div>
-                <div className="mt-auto flex gap-2">
+                <div className="mt-auto flex items-center gap-2">
                     <button onClick={onClose}
                         className="flex-1 px-2.5 py-1.5 rounded-md ring-1 ring-white/20 text-white/70 hover:bg-white/10 text-xs inline-flex items-center justify-center gap-1.5">
                         <ArrowLeft className="h-3.5 w-3.5" /> Back
                     </button>
-                    <button onClick={save}
-                        className="flex-1 px-2.5 py-1.5 inline-flex items-center justify-center gap-1.5 rounded-md ring-1 ring-emerald-400/50 bg-emerald-500/15 text-emerald-100 hover:bg-emerald-500/30 text-xs">
-                        <Save className="h-3.5 w-3.5" /> Save
-                    </button>
+                    {!draft.id ? (
+                        <button onClick={createNow}
+                            className="flex-1 px-2.5 py-1.5 inline-flex items-center justify-center gap-1.5 rounded-md ring-1 ring-emerald-400/50 bg-emerald-500/15 text-emerald-100 hover:bg-emerald-500/30 text-xs">
+                            Create
+                        </button>
+                    ) : (
+                        <SaveStatusPill status={saveStatus} />
+                    )}
                 </div>
             </div>
 
@@ -384,7 +468,7 @@ function ListingBlock({
 //     persists this as a hidden "shadow" interior linked to the property.
 
 function HouseEditor({
-    initial, initialMlo, interiors, onClose, onSaved,
+    initial, initialMlo, interiors, onClose, onSaved: _onSaved,
 }: {
     initial: House;
     initialMlo: MloDraft | null; // present when editing an existing MLO property
@@ -398,12 +482,18 @@ function HouseEditor({
     const [type, setType] = useState<"teleport" | "mlo">(initialType);
     const [draft, setDraft] = useState<House>(initial);
     const [mlo, setMlo] = useState<MloDraft>(initialMlo ?? DEFAULT_MLO(initial.label || "Property MLO"));
+    const [saveStatus, setSaveStatus] = useState<"idle" | "pending" | "saved">("idle");
+    const firstMount = useRef(true);
+    const saveTimer = useRef<number | null>(null);
+    const savedFlash = useRef<number | null>(null);
 
     const update = (patch: Partial<House>) => setDraft((d) => ({ ...d, ...patch }));
     const updateMlo = (patch: Partial<MloDraft>) => setMlo((m) => ({ ...m, ...patch }));
 
     // Mirror the editor's preview into the in-world layer. World door
-    // always renders; MLO mode also renders idle / mgmt and any zones.
+    // always renders. MLO mode renders idle / mgmt and inline zones.
+    // Teleport mode pulls the linked interior's points and zones in too
+    // so the admin sees the destination layout while editing.
     useEffect(() => {
         const points: { kind: string; x: number; y: number; z: number; w: number }[] = [{
             kind: "house_door",
@@ -419,10 +509,73 @@ function HouseEditor({
             zones = mlo.zones.map((z) => ({
                 origin: z.origin, xCells: z.xCells, yCells: z.yCells, cell: z.cell,
             }));
+        } else if (draft.interior_id) {
+            const linked = interiors.find((i) => i.id === draft.interior_id);
+            if (linked) {
+                points.push(
+                    { kind: "idle", x: linked.idle_x, y: linked.idle_y, z: linked.idle_z, w: linked.idle_w },
+                    { kind: "mgmt", x: linked.mgmt_x, y: linked.mgmt_y, z: linked.mgmt_z, w: linked.mgmt_w },
+                    { kind: "door", x: linked.door_x, y: linked.door_y, z: linked.door_z, w: linked.door_w },
+                    { kind: "exit", x: linked.exit_x, y: linked.exit_y, z: linked.exit_z, w: linked.exit_w },
+                );
+                zones = linked.zones.map((z) => ({
+                    origin: z.origin, xCells: z.xCells, yCells: z.yCells, cell: z.cell,
+                }));
+            }
         }
         fetchNui("housingSetPreview", { points, zones });
-    }, [draft, mlo, type]);
+    }, [draft, mlo, type, interiors]);
     useEffect(() => () => { fetchNui("housingClearPreview", {}); }, []);
+
+    // Debounced auto-save. Same shape as InteriorEditor: skip first mount,
+    // queue a save 600ms after the last change, show status in the footer.
+    // New drafts (id="") wait for the admin to click "Create" before any
+    // server traffic so we don't persist a half-empty placeholder row.
+    useEffect(() => {
+        if (firstMount.current) {
+            firstMount.current = false;
+            return;
+        }
+        if (!draft.id) {
+            setSaveStatus("idle");
+            return;
+        }
+        if (type === "teleport" && !draft.interior_id) {
+            setSaveStatus("idle");
+            return;
+        }
+        setSaveStatus("pending");
+        if (saveTimer.current) window.clearTimeout(saveTimer.current);
+        saveTimer.current = window.setTimeout(() => {
+            if (type === "teleport") {
+                fetchNui("housingSaveHouse", { payload: { ...draft, kind: "teleport" } });
+            } else {
+                fetchNui("housingSaveHouse", { payload: { ...draft, kind: "mlo", mlo } });
+            }
+            setSaveStatus("saved");
+            if (savedFlash.current) window.clearTimeout(savedFlash.current);
+            savedFlash.current = window.setTimeout(() => setSaveStatus("idle"), 1500);
+        }, 600);
+        return () => {
+            if (saveTimer.current) window.clearTimeout(saveTimer.current);
+        };
+    }, [draft, mlo, type]);
+
+    useNuiEvent<{ tempId: string; savedId: string }>("houseSaved", (d) => {
+        if (!d) return;
+        if (!draft.id && d.tempId === "") {
+            setDraft((cur) => ({ ...cur, id: d.savedId }));
+        }
+    });
+
+    const createNow = () => {
+        if (type === "teleport") {
+            fetchNui("housingSaveHouse", { payload: { ...draft, kind: "teleport" } });
+        } else {
+            fetchNui("housingSaveHouse", { payload: { ...draft, kind: "mlo", mlo } });
+        }
+        setSaveStatus("pending");
+    };
 
     useNuiEvent<{ point: Vec4 | null }>("housingDoorPicked", (d) => {
         if (d.point) update({
@@ -470,22 +623,8 @@ function HouseEditor({
         updateMlo({ zones: mlo.zones.filter((_, idx) => idx !== i) });
 
     const teleportInteriors = interiors.filter(
-        (i) => i.kind === "teleport" && !i.id.startsWith("_mlo_") && i.id !== "_legacy"
+        (i) => i.kind === "teleport" && !i.id.startsWith("_mlo_")
     );
-
-    const canSave =
-        type === "teleport"
-            ? !!draft.interior_id
-            : true;
-
-    const save = () => {
-        if (type === "teleport") {
-            fetchNui("housingSaveHouse", { payload: { ...draft, kind: "teleport" } });
-        } else {
-            fetchNui("housingSaveHouse", { payload: { ...draft, kind: "mlo", mlo } });
-        }
-        onSaved();
-    };
 
     return (
         <div className="grid grid-cols-[260px_minmax(0,1fr)_minmax(0,1fr)] gap-3 h-full min-h-0">
@@ -542,15 +681,24 @@ function HouseEditor({
                         door_world_z: p.z, door_world_w: p.w,
                     })}
                     hint="Door blip / 'Inspect' / 'Enter' target." />
-                <div className="mt-auto flex gap-2">
+                <div className="mt-auto flex items-center gap-2">
                     <button onClick={onClose}
                         className="flex-1 px-2.5 py-1.5 rounded-md ring-1 ring-white/20 text-white/70 hover:bg-white/10 text-xs inline-flex items-center justify-center gap-1.5">
                         <ArrowLeft className="h-3.5 w-3.5" /> Back
                     </button>
-                    <button onClick={save} disabled={!canSave}
-                        className="flex-1 px-2.5 py-1.5 inline-flex items-center justify-center gap-1.5 rounded-md ring-1 ring-emerald-400/50 bg-emerald-500/15 text-emerald-100 hover:bg-emerald-500/30 text-xs disabled:opacity-40">
-                        <Save className="h-3.5 w-3.5" /> Save
-                    </button>
+                    {!draft.id ? (
+                        <button
+                            onClick={createNow}
+                            disabled={type === "teleport" && !draft.interior_id}
+                            className="flex-1 px-2.5 py-1.5 inline-flex items-center justify-center gap-1.5 rounded-md ring-1 ring-emerald-400/50 bg-emerald-500/15 text-emerald-100 hover:bg-emerald-500/30 text-xs disabled:opacity-40 disabled:cursor-not-allowed">
+                            Create
+                        </button>
+                    ) : (
+                        <SaveStatusPill
+                            status={saveStatus}
+                            warn={type === "teleport" && !draft.interior_id ? "pick interior" : undefined}
+                        />
+                    )}
                 </div>
             </div>
 
@@ -720,12 +868,12 @@ export function HousingPanel({
     initial, panel, hidden, onClose,
 }: {
     initial: { interiors: Interior[]; houses: House[] };
-    panel: "houses" | "interiors";
+    panel: DrugsTab;
     hidden: boolean;
     onClose: () => void;
 }) {
     const { interiors, houses } = useHousingData(initial);
-    const [tab, setTab] = useState<"houses" | "interiors">(panel);
+    const [tab, setTab] = useState<DrugsTab>(panel);
     const [editingInterior, setEditingInterior] = useState<Interior | null>(null);
     const [editingHouse, setEditingHouse] = useState<House | null>(null);
     const [walking, setWalking] = useState(false);
@@ -739,14 +887,14 @@ export function HousingPanel({
     });
 
     const sortedHouses = useMemo(
-        () => [...houses].filter((h) => h.id !== "_legacy").sort((a, b) => a.id.localeCompare(b.id)),
+        () => [...houses].sort((a, b) => a.id.localeCompare(b.id)),
         [houses]
     );
     // Visible Interior templates are teleport-kind only; MLO interiors are
     // shadow rows owned by a specific Property and never shown in this list.
     const sortedInteriors = useMemo(
         () => [...interiors]
-            .filter((i) => i.id !== "_legacy" && !i.id.startsWith("_mlo_") && i.kind === "teleport")
+            .filter((i) => !i.id.startsWith("_mlo_") && i.kind === "teleport")
             .sort((a, b) => a.id.localeCompare(b.id)),
         [interiors]
     );
@@ -782,7 +930,10 @@ export function HousingPanel({
             <div
                 className={
                     "pointer-events-auto rounded-2xl bg-black/95 ring-1 ring-white/10 shadow-2xl overflow-hidden " +
-                    "w-[1100px] max-w-[96vw] h-[380px] flex flex-col " +
+                    "w-[1100px] max-w-[96vw] flex flex-col " +
+                    // Dealing tab needs more vertical room for the map +
+                    // customer column; other tabs stay compact.
+                    (tab === "dealing" ? "h-[520px] " : "h-[380px] ") +
                     (walking ? "opacity-70" : "")
                 }
                 style={walking ? { pointerEvents: "none" } : undefined}
@@ -831,6 +982,8 @@ export function HousingPanel({
                             onClose={() => setEditingHouse(null)}
                             onSaved={() => setEditingHouse(null)}
                         />
+                    ) : tab === "dealing" ? (
+                        <DealingPanel />
                     ) : tab === "houses" ? (
                         <div className="h-full flex flex-col gap-2 min-h-0">
                             <div className="flex items-center justify-between shrink-0">

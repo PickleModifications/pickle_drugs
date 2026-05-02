@@ -9,7 +9,10 @@ import { EmployeeInfoPanel } from "./EmployeeInfoPanel";
 import { HousingPanel } from "./HousingPanel";
 import { HouseManagePanel } from "./HouseManagePanel";
 import { HousePlacementHud } from "./HousePlacementHud";
+import { StoragePanel } from "./StoragePanel";
 import { ZonePickerHud } from "./ZonePickerHud";
+import { Phone } from "./phone/Phone";
+import { DealsHud } from "./DealsHud";
 // ─── SmoothBar ────────────────────────────────────────────────────────────
 function SmoothBar({ target, className, speed = 6, }) {
     const [value, setValue] = useState(target);
@@ -193,7 +196,6 @@ function App() {
     // Employees roster surface
     const [employeesOpen, setEmployeesOpen] = useState(false);
     const [employeesHidden, setEmployeesHidden] = useState(false);
-    const [employeesModels, setEmployeesModels] = useState([]);
     const [employeesList, setEmployeesList] = useState([]);
     // Plot assigner surface
     const [assignerOpen, setAssignerOpen] = useState(false);
@@ -211,8 +213,19 @@ function App() {
     const [houseManageData, setHouseManageData] = useState(null);
     // Placement HUD
     const [placementHud, setPlacementHud] = useState(null);
+    // Storage locker panel
+    const [storageData, setStorageData] = useState(null);
     // Zone picker HUD (admin in-world zone bounds picker)
     const [zonePickerHud, setZonePickerHud] = useState(null);
+    const [phoneOpen, setPhoneOpen] = useState(false);
+    // Unread messages count — lifted to App so it survives Phone
+    // mount/unmount. Otherwise the badge reset to 0 every time the
+    // phone closed (no events would fire to repopulate it before
+    // the user re-opened it).
+    const [messagesUnread, setMessagesUnread] = useState(0);
+    // DealsHud is a true world HUD — visible whenever the player has any
+    // active/scheduled deals, regardless of which (if any) panel is open.
+    const [dealsHud, setDealsHud] = useState([]);
     const [pitcherLevel, setPitcherLevel] = useState(1.0);
     const [plantWaterLevel, setPlantWaterLevel] = useState(0.0);
     const [showPlantWater, setShowPlantWater] = useState(false);
@@ -254,7 +267,6 @@ function App() {
     });
     // Employees roster
     useNuiEvent("openEmployees", (data) => {
-        setEmployeesModels(data?.models ?? []);
         setEmployeesList(data?.employees ?? []);
         setEmployeesHidden(false);
         setEmployeesOpen(true);
@@ -322,6 +334,18 @@ function App() {
     // Placement HUD
     useNuiEvent("openPlacementHud", (data) => setPlacementHud(data ?? null));
     useNuiEvent("closePlacementHud", () => setPlacementHud(null));
+    // Storage locker panel
+    useNuiEvent("openStoragePanel", (data) => setStorageData(data ?? null));
+    useNuiEvent("closeStoragePanel", () => setStorageData(null));
+    // Phone (in-game device — currently just hosts the Help app)
+    useNuiEvent("openPhone", () => setPhoneOpen(true));
+    useNuiEvent("closePhone", () => setPhoneOpen(false));
+    useNuiEvent("messagesUnread", (n) => {
+        if (typeof n === "number")
+            setMessagesUnread(n);
+    });
+    // Active/scheduled deals push (from dealing/client.lua).
+    useNuiEvent("dealsHudUpdate", (d) => setDealsHud(d ?? []));
     // Zone picker HUD
     useNuiEvent("openZonePickerHud", (data) => setZonePickerHud(data ?? null));
     useNuiEvent("updateZonePickerHud", (data) => {
@@ -445,38 +469,59 @@ function App() {
         empInfoOpen ||
         housingOpen ||
         houseManageOpen ||
+        phoneOpen ||
+        !!storageData ||
         !!placementHud ||
         !!zonePickerHud ||
         !!gizmoHelp;
+    // The DealsHud is a true HUD: present whenever the player has any
+    // active or scheduled deals, regardless of which (if any) panel is
+    // up. Rendered as a sibling to whatever else the App returns.
+    const hudOverlay = dealsHud.length > 0 ? _jsx(DealsHud, { data: dealsHud }) : null;
     if (!anyOpen)
-        return null;
-    if (housingOpen && !open) {
-        return (_jsxs(_Fragment, { children: [_jsx(HousingPanel, { initial: housingInitial, panel: housingPanel, hidden: housingHidden, onClose: () => fetchNui("housingClose") }), gizmoHelp && _jsx(GizmoHelpBar, { ...gizmoHelp }), zonePickerHud && _jsx(ZonePickerHud, { data: zonePickerHud })] }));
-    }
-    if (houseManageOpen && houseManageData && !open) {
-        return (_jsx(HouseManagePanel, { data: houseManageData, onClose: () => fetchNui("houseManageClose") }));
-    }
-    if (placementHud && !open) {
-        return _jsx(HousePlacementHud, { data: placementHud });
-    }
-    if (zonePickerHud && !open) {
-        return _jsx(ZonePickerHud, { data: zonePickerHud });
-    }
-    if (creatorOpen && !open) {
-        return (_jsxs(_Fragment, { children: [_jsx(CreatorPanel, { drugs: creatorDrugs, plots: creatorPlots, hidden: creatorHidden, onClose: () => fetchNui("creatorClose") }), gizmoHelp && _jsx(GizmoHelpBar, { ...gizmoHelp })] }));
-    }
-    if (employeesOpen && !open) {
-        return (_jsxs(_Fragment, { children: [_jsx(EmployeesPanel, { models: employeesModels, employees: employeesList, hidden: employeesHidden, onClose: () => fetchNui("employeesClose") }), gizmoHelp && _jsx(GizmoHelpBar, { ...gizmoHelp })] }));
-    }
-    if (assignerOpen && assignerData && !open) {
-        return (_jsx(AssignerPanel, { empId: assignerData.empId, firstName: assignerData.firstName, lastName: assignerData.lastName, plots: assignerData.plots, initiallyAssigned: assignerData.assignedPlots, onClose: () => fetchNui("assignerClose") }));
-    }
-    if (empInfoOpen && empInfoData && !open) {
-        return (_jsx(EmployeeInfoPanel, { employee: empInfoData, onClose: () => fetchNui("employeeInfoClose") }));
-    }
-    if (!open && gizmoHelp) {
-        return _jsx(GizmoHelpBar, { ...gizmoHelp });
-    }
-    return (_jsxs("div", { ref: rootRef, tabIndex: 0, autoFocus: true, onKeyDown: onKeyDown, onKeyUp: onKeyUp, onClick: onClick, onMouseDown: onMouseDown, onMouseUp: onMouseUp, onMouseMove: onMouseMove, onBlur: () => requestAnimationFrame(() => rootRef.current?.focus()), className: "fixed inset-0 outline-none", children: [activeAction === "watering" && (_jsx(WateringMeters, { pitcher: pitcherLevel, plantLevel: plantWaterLevel, showPlant: showPlantWater })), status && (_jsxs("div", { className: "absolute left-1/2 -translate-x-1/2 bottom-4 pointer-events-auto rounded-2xl bg-black/95 ring-1 ring-white/10 shadow-2xl overflow-hidden w-fit", children: [_jsxs("div", { className: "grid grid-cols-[auto_1fr_auto] items-center gap-4 px-5 h-9 border-b border-white/5 bg-white/[0.02]", children: [_jsx("span", { className: "text-[10px] uppercase tracking-[0.18em] text-white/45 whitespace-nowrap", children: "Plant Console" }), _jsx("div", { className: "flex justify-center items-center min-w-0 px-2 h-full", children: _jsx(ActionHintInline, { activeAction: activeAction }) }), _jsx("span", { className: "w-0", "aria-hidden": true })] }), _jsxs("div", { className: "flex items-stretch divide-x divide-white/5", children: [_jsx(ActionsSection, { actions: actions, activeAction: activeAction, onSelect: onSelect, onCancelAction: onCancelAction, onClose: onClose }), _jsx(StatusSection, { status: status })] })] }))] }));
+        return hudOverlay;
+    // Compute which panel surface to show via the existing cascade. Wrap
+    // it in an IIFE so the DealsHud can sit as a sibling without edits
+    // to every individual `return` branch.
+    const panelEl = (() => {
+        if (phoneOpen && !open) {
+            return (_jsx(Phone, { messagesUnread: messagesUnread, onClose: () => {
+                    setPhoneOpen(false);
+                    fetchNui("phoneClose");
+                } }));
+        }
+        if (housingOpen && !open) {
+            return (_jsxs(_Fragment, { children: [_jsx(HousingPanel, { initial: housingInitial, panel: housingPanel, hidden: housingHidden, onClose: () => fetchNui("housingClose") }), gizmoHelp && _jsx(GizmoHelpBar, { ...gizmoHelp }), zonePickerHud && _jsx(ZonePickerHud, { data: zonePickerHud })] }));
+        }
+        if (houseManageOpen && houseManageData && !open) {
+            return (_jsx(HouseManagePanel, { data: houseManageData, onClose: () => fetchNui("houseManageClose") }));
+        }
+        if (storageData && !open) {
+            return (_jsx(StoragePanel, { data: storageData, onClose: () => fetchNui("storageClose") }));
+        }
+        if (placementHud && !open) {
+            return _jsx(HousePlacementHud, { data: placementHud });
+        }
+        if (zonePickerHud && !open) {
+            return _jsx(ZonePickerHud, { data: zonePickerHud });
+        }
+        if (creatorOpen && !open) {
+            return (_jsxs(_Fragment, { children: [_jsx(CreatorPanel, { drugs: creatorDrugs, plots: creatorPlots, hidden: creatorHidden, onClose: () => fetchNui("creatorClose") }), gizmoHelp && _jsx(GizmoHelpBar, { ...gizmoHelp })] }));
+        }
+        if (employeesOpen && !open) {
+            return (_jsxs(_Fragment, { children: [_jsx(EmployeesPanel, { employees: employeesList, hidden: employeesHidden, onClose: () => fetchNui("employeesClose") }), gizmoHelp && _jsx(GizmoHelpBar, { ...gizmoHelp })] }));
+        }
+        if (assignerOpen && assignerData && !open) {
+            return (_jsx(AssignerPanel, { empId: assignerData.empId, firstName: assignerData.firstName, lastName: assignerData.lastName, plots: assignerData.plots, initiallyAssigned: assignerData.assignedPlots, onClose: () => fetchNui("assignerClose") }));
+        }
+        if (empInfoOpen && empInfoData && !open) {
+            return (_jsx(EmployeeInfoPanel, { employee: empInfoData, onClose: () => fetchNui("employeeInfoClose") }));
+        }
+        if (!open && gizmoHelp) {
+            return _jsx(GizmoHelpBar, { ...gizmoHelp });
+        }
+        return (_jsxs("div", { ref: rootRef, tabIndex: 0, autoFocus: true, onKeyDown: onKeyDown, onKeyUp: onKeyUp, onClick: onClick, onMouseDown: onMouseDown, onMouseUp: onMouseUp, onMouseMove: onMouseMove, onBlur: () => requestAnimationFrame(() => rootRef.current?.focus()), className: "fixed inset-0 outline-none", children: [activeAction === "watering" && (_jsx(WateringMeters, { pitcher: pitcherLevel, plantLevel: plantWaterLevel, showPlant: showPlantWater })), status && (_jsxs("div", { className: "absolute left-1/2 -translate-x-1/2 bottom-4 pointer-events-auto rounded-2xl bg-black/95 ring-1 ring-white/10 shadow-2xl overflow-hidden w-fit", children: [_jsxs("div", { className: "grid grid-cols-[auto_1fr_auto] items-center gap-4 px-5 h-9 border-b border-white/5 bg-white/[0.02]", children: [_jsx("span", { className: "text-[10px] uppercase tracking-[0.18em] text-white/45 whitespace-nowrap", children: "Plant Console" }), _jsx("div", { className: "flex justify-center items-center min-w-0 px-2 h-full", children: _jsx(ActionHintInline, { activeAction: activeAction }) }), _jsx("span", { className: "w-0", "aria-hidden": true })] }), _jsxs("div", { className: "flex items-stretch divide-x divide-white/5", children: [_jsx(ActionsSection, { actions: actions, activeAction: activeAction, onSelect: onSelect, onCancelAction: onCancelAction, onClose: onClose }), _jsx(StatusSection, { status: status })] })] }))] }));
+    })();
+    return _jsxs(_Fragment, { children: [panelEl, hudOverlay] });
 }
 export default App;

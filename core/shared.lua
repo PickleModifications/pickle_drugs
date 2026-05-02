@@ -4,6 +4,25 @@ function debugPrint(...)
     end
 end
 
+-- ─── Entity framework ─────────────────────────────────────────────────────
+-- Shared registry for placed entity kinds (plots, storage lockers, future
+-- types). The renderer (core/client.lua) and the broadcasters
+-- (core/server.lua) both consume this. A "kind" handler registers spawn /
+-- despawn / update / heal callbacks here; the dispatcher in core/client
+-- routes incoming entityUpdate events through the right handler.
+-- `PickleEntity` (not `Entity`) — `Entity` is a CitizenFX built-in
+-- (entity wrapper function) so any global named `Entity` collides with
+-- the runtime and produces "attempt to index a function value" on the
+-- first .field access.
+PickleEntity = PickleEntity or { kinds = {} }
+
+function PickleEntity.RegisterKind(kind, handlers)
+    if type(kind) ~= "string" or type(handlers) ~= "table" then return end
+    PickleEntity.kinds[kind] = handlers
+end
+
+function PickleEntity.GetKind(kind) return PickleEntity.kinds[kind] end
+
 function lerp(a, b, t) return a + (b-a) * t end
 
 --- Loads a model and waits up to `timeoutMs` for it to stream in.

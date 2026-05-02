@@ -12,5 +12,6 @@ end
 
 Inventory.RemoveItem = function() return false end
 Inventory.GetItemCount = function() return 0 end
+Inventory.GetPlayerItems = function() return {} end
 
 print("[pickle_drugs] no supported inventory detected — running with the standalone stub. Add a bridge under bridge/<inv>/server.lua to enable harvest payouts.")

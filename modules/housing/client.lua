@@ -40,6 +40,42 @@ local function targetAvailable()
     return GetResourceState("ox_target") == "started"
 end
 
+-- ─── Pivot-offset compensation ────────────────────────────────────────────
+-- Stock props (e.g. ch_prop_*_locker_*) often have their pivot at one
+-- corner of the bbox rather than its centre. When we anchor a placement to
+-- the geometric centre of the footprint, those props end up visibly
+-- shifted. Compensate by translating the entity by the bbox-centre offset
+-- (rotated into world space so heading is respected).
+
+--- Returns the local-frame XY offset of the model's bbox centre from its
+--- pivot. Z is intentionally ignored — placement only centres in plan view.
+---@param model string|integer
+---@return number offX, number offY
+function Housing.ModelPivotOffset(model)
+    local hash = type(model) == "string" and joaat(model) or model
+    if not hash or not IsModelInCdimage(hash) then return 0.0, 0.0 end
+    local pmin, pmax = GetModelDimensions(hash)
+    return (pmin.x + pmax.x) / 2.0, (pmin.y + pmax.y) / 2.0
+end
+
+--- Adjusts a footprint-centre world coord for a model so the *bbox* centre
+--- (not the pivot) lands at the target. Pass the heading so the local
+--- offset rotates with the prop.
+---@param model       string|integer
+---@param x           number  footprint centre X
+---@param y           number  footprint centre Y
+---@param z           number
+---@param headingDeg  number
+function Housing.AdjustSpawnCoords(model, x, y, z, headingDeg)
+    local offX, offY = Housing.ModelPivotOffset(model)
+    if offX == 0.0 and offY == 0.0 then return x, y, z end
+    local h = math.rad(headingDeg or 0.0)
+    local cosH, sinH = math.cos(h), math.sin(h)
+    return x - (cosH * offX - sinH * offY),
+           y - (sinH * offX + cosH * offY),
+           z
+end
+
 -- ─── Door target ──────────────────────────────────────────────────────────
 
 local function refreshDoorTarget(h)
@@ -558,15 +594,24 @@ local function placementLoop()
         local zone, cx, cy = resolveZoneAt(p, cursor.x, cursor.y, cursor.z, fw, fh)
 
         local valid, snapX, snapY, snapZ, heading
+        -- The footprint highlight rotates with the prop, so its base
+        -- dimensions are the *un-rotated* model bounds (boxSizeX/Y).
+        -- The server-bound sizeX/Y are the *rotated* dimensions because
+        -- the server derives axis-aligned footprint cells from them.
+        local boxSizeX, boxSizeY
         local sizeX = (rotated and p.sizeY or p.sizeX) or 0.0
         local sizeY = (rotated and p.sizeX or p.sizeY) or 0.0
         if zone then
-            snapX, snapY, snapZ, heading = snapPoseForFootprint(zone, cx, cy, fw, fh, p.rotIndex)
+            snapX, snapY, snapZ = snapPoseForFootprint(zone, cx, cy, fw, fh, p.rotIndex)
+            -- Heading: zone heading + rotation step. Matches what the
+            -- grow/storage create-events persist on confirm so the
+            -- preview reads identical to the final placed prop.
+            heading = (zone.origin.w or 0.0) + (p.rotIndex % 4) * 90.0
             valid = Housing.CanPlaceAt(zone, cx, cy, fw, fh, p.occupiedByZone[zone.id])
-            -- Re-derive footprint world size from the snapped zone's cell
-            -- (zones share Config.Housing.gridCellSize but we don't assume).
-            sizeX = fw * zone.cell
-            sizeY = fh * zone.cell
+            sizeX  = fw * zone.cell
+            sizeY  = fh * zone.cell
+            boxSizeX = math.max(p.sizeX, p.fwBase * zone.cell)
+            boxSizeY = math.max(p.sizeY, p.fhBase * zone.cell)
         else
             -- Free placement: park entity on the cursor, no snap, no valid.
             snapX, snapY, snapZ = cursor.x, cursor.y, cursor.z
@@ -575,11 +620,15 @@ local function placementLoop()
             local cell = (Config.Housing and Config.Housing.gridCellSize) or 0.5
             sizeX = math.max(p.sizeX, fw * cell)
             sizeY = math.max(p.sizeY, fh * cell)
+            boxSizeX = math.max(p.sizeX, p.fwBase * cell)
+            boxSizeY = math.max(p.sizeY, p.fhBase * cell)
         end
 
-        -- Update entity preview pose.
+        -- Update entity preview pose. Compensate for the model's pivot so
+        -- the prop's bbox centre lands on the footprint centre.
         if p.entity and DoesEntityExist(p.entity) then
-            SetEntityCoords(p.entity, snapX, snapY, snapZ, false, false, false, false)
+            local ex, ey, ez = Housing.AdjustSpawnCoords(p.model, snapX, snapY, snapZ, heading)
+            SetEntityCoords(p.entity, ex, ey, ez, false, false, false, false)
             SetEntityRotation(p.entity, 0.0, 0.0, heading, 2, true)
         end
 
@@ -591,14 +640,16 @@ local function placementLoop()
         local valColor = cfg.validColor   or { r = 80,  g = 200, b = 120 }
         local invColor = cfg.invalidColor or { r = 230, g = 80,  b = 80  }
         local boxColor = valid and valColor or invColor
-        drawFootprintBox(snapX, snapY, snapZ, heading, sizeX, sizeY, boxColor, 180)
+        drawFootprintBox(snapX, snapY, snapZ, heading, boxSizeX, boxSizeY, boxColor, 180)
         -- Forward-facing arrow on top of the footprint. Uses a contrasting
         -- white tint so it reads on both the green (valid) and red (invalid)
         -- footprint colors without requiring a separate config entry.
-        drawDirectionArrow(snapX, snapY, snapZ, heading, sizeX, sizeY,
+        drawDirectionArrow(snapX, snapY, snapZ, heading, boxSizeX, boxSizeY,
             { r = 255, g = 255, b = 255 }, 220)
 
-        -- Stash the picked cell so confirm has it.
+        -- Stash the picked cell so confirm has it. lastSizeX/Y are the
+        -- *rotated* bbox dims — the server uses them to derive
+        -- axis-aligned footprint cells.
         p.lastZone, p.lastCx, p.lastCy = zone, cx, cy
         p.lastSizeX, p.lastSizeY = sizeX, sizeY
 
@@ -739,14 +790,13 @@ end
 local ManageOpen = false
 local OpenHouseId = nil
 
-local function openManage(houseId)
-    if ManageOpen then return end
+--- Refetch everything the manage panel needs and push it as an
+--- openHouseManage payload. Used by the initial open and by the
+--- houseUpdate listener so the panel never goes stale after a purchase
+--- / rent / lease change while it's open.
+local function buildAndSendHouseManage(houseId)
     local detail = lib.callback.await("pickle_drugs:getHouseDetail", false, houseId)
-    if not detail then return end
-    ManageOpen = true
-    OpenHouseId = houseId
-    SetNuiFocus(true, true)
-    -- Build per-zone entity lists for the placement UI.
+    if not detail then return false end
     local zonePlots = {}
     for _, p in ipairs(detail.entities or {}) do
         zonePlots[p.zone_id] = zonePlots[p.zone_id] or {}
@@ -754,21 +804,44 @@ local function openManage(houseId)
     end
     local employees = lib.callback.await("pickle_drugs:listHouseEmployees", false, houseId) or {}
     local pedModels = (Employees and Employees.PedModels) or {}
+    local storageTypes = {}
+    if Config.Storage and Config.Storage.types then
+        for id, t in pairs(Config.Storage.types) do
+            storageTypes[#storageTypes + 1] = {
+                id    = id,
+                label = t.label or id,
+                slots = tonumber(t.slots) or 0,
+            }
+        end
+        table.sort(storageTypes, function(a, b) return a.slots < b.slots end)
+    end
     SendNUIMessage({
         action = "openHouseManage",
         data = {
-            house      = detail.house,
-            interior   = detail.interior,
-            cid        = detail.cid,
-            canAccess  = detail.canAccess,
-            isOwner    = detail.isOwner,
-            entities   = detail.entities,
-            zonePlots  = zonePlots,
-            drugs      = lib.callback.await("pickle_drugs:listDrugs", false) or {},
-            employees  = employees,
-            pedModels  = pedModels,
+            house        = detail.house,
+            interior     = detail.interior,
+            cid          = detail.cid,
+            canAccess    = detail.canAccess,
+            isOwner      = detail.isOwner,
+            isAdmin      = detail.isAdmin,
+            entities     = detail.entities,
+            lockers      = detail.lockers or {},
+            zonePlots    = zonePlots,
+            drugs        = lib.callback.await("pickle_drugs:listDrugs", false) or {},
+            storageTypes = storageTypes,
+            employees    = employees,
+            pedModels    = pedModels,
         },
     })
+    return true
+end
+
+local function openManage(houseId)
+    if ManageOpen then return end
+    if not buildAndSendHouseManage(houseId) then return end
+    ManageOpen = true
+    OpenHouseId = houseId
+    SetNuiFocus(true, true)
 end
 
 local function closeManage()
@@ -793,6 +866,14 @@ local function pushHouseEntities(houseId)
     })
 end
 
+-- Live refresh: any house mutation (purchase, rent, lease cancel, label
+-- change, etc.) on the open house refreshes the whole panel so its
+-- gates (placement, workers, residents) reflect the new tenure / owner.
+AddEventHandler("pickle_drugs:houseUpdate", function(h)
+    if not ManageOpen or not OpenHouseId or not h or h.id ~= OpenHouseId then return end
+    buildAndSendHouseManage(OpenHouseId)
+end)
+
 -- Live refresh: any plot mutation that touches the open house redraws
 -- the placed-entities list. Plots placed in another house are ignored.
 RegisterNetEvent("pickle_drugs:plotUpdate", function(plot)
@@ -806,6 +887,27 @@ RegisterNetEvent("pickle_drugs:plotRemoved", function(_plotId)
     -- We don't get the removed plot's house_id back; refetching is cheap
     -- and the panel filter catches the no-op case.
     pushHouseEntities(OpenHouseId)
+end)
+
+local function pushHouseLockers(houseId)
+    if not ManageOpen or houseId ~= OpenHouseId then return end
+    local detail = lib.callback.await("pickle_drugs:getHouseDetail", false, houseId)
+    if not detail then return end
+    SendNUIMessage({
+        action = "houseLockersList",
+        data   = { lockers = detail.lockers or {} },
+    })
+end
+
+RegisterNetEvent("pickle_drugs:storageUpdate", function(row)
+    if not ManageOpen or not OpenHouseId or not row then return end
+    if row.house_id ~= OpenHouseId then return end
+    pushHouseLockers(OpenHouseId)
+end)
+
+RegisterNetEvent("pickle_drugs:storageRemoved", function(_id)
+    if not ManageOpen or not OpenHouseId then return end
+    pushHouseLockers(OpenHouseId)
 end)
 
 -- Same idea for the workers list.
@@ -891,9 +993,8 @@ RegisterNUICallback("houseAssignWorkerPlots", function(data, cb)
 end)
 
 --- Reusable plot mover. Used by both the manage panel ("Move" button on
---- a row) and the in-world ox_target on the plot itself. The plot must
---- already belong to a real house — for `_legacy` plots the player should
---- use the admin `/drugs` flow instead.
+--- a row) and the in-world plant scene ("Move" action). Every plot
+--- belongs to a real house; orphans don't survive boot.
 function Housing.MovePlot(plotId, houseId)
     if not plotId or not houseId then return end
     local h = Houses[houseId]
@@ -915,6 +1016,9 @@ function Housing.MovePlot(plotId, houseId)
             existing[#existing + 1] = p
         end
     end
+    -- Lockers share the same grid — including them stops the player
+    -- from snapping a moved plot into a cell already held by storage.
+    for _, l in ipairs(detail.lockers or {}) do existing[#existing + 1] = l end
     if not target then return end
 
     local drugCfg = Config.Drugs[target.drug]
@@ -931,6 +1035,16 @@ function Housing.MovePlot(plotId, houseId)
     local relDeg = ((target.coords_w or 0.0) - zoneW) % 360
     local initialRotIndex = math.floor((relDeg + 45) / 90) % 4
 
+    -- Hide the live prop locally for the duration of the placement so it
+    -- doesn't double up with the placement preview at the old pose. The
+    -- plant scene was closed before this point if it had been open on
+    -- this plot (the "Move" action calls ClosePlantScene first); call
+    -- it again defensively in case the move was triggered from elsewhere.
+    if IsPlantSceneActive and IsPlantSceneActive() and ClosePlantScene then
+        ClosePlantScene()
+    end
+    if SetPlotVisible then SetPlotVisible(plotId, false) end
+
     Housing.StartPlacement({
         houseId         = houseId,
         zones           = interior.zones,
@@ -941,8 +1055,14 @@ function Housing.MovePlot(plotId, houseId)
             TriggerServerEvent("pickle_drugs:moveHousePlot",
                 plotId, res.zoneId,
                 res.cx, res.cy, res.sizeX, res.sizeY, res.rotIndex)
+            -- The server's plotUpdate broadcast respawns the prop at the
+            -- new pose, so visibility resets implicitly. Nothing to do.
         end,
-        onCancel = function() end,
+        onCancel = function()
+            -- Cancelled — restore the original prop's visibility since
+            -- no plotUpdate will fire.
+            if SetPlotVisible then SetPlotVisible(plotId, true) end
+        end,
     })
 end
 
@@ -967,6 +1087,127 @@ RegisterNUICallback("houseDeletePlot", function(data, cb)
     TriggerServerEvent("pickle_drugs:deleteHousePlot", data.plotId)
 end)
 
+RegisterNUICallback("housePlotSetOutput", function(data, cb)
+    cb({ ok = true })
+    if not data or not data.plotId then return end
+    TriggerServerEvent("pickle_drugs:setPlotOutput", data.plotId, data.lockerId)
+end)
+
+RegisterNUICallback("houseStartStorage", function(data, cb)
+    cb({ ok = true })
+    if not data or not data.houseId or not data.kind then return end
+    local h = Houses[data.houseId]
+    local interior = h and Interiors[h.interior_id]
+    if not interior or not interior.zones or #interior.zones == 0 then return end
+    local kindCfg = Config.Storage and Config.Storage.types and Config.Storage.types[data.kind]
+    if not kindCfg or not kindCfg.model then return end
+
+    SetNuiFocus(false, false)
+    SendNUIMessage({ action = "closeHouseManage" })
+    ManageOpen = false
+
+    -- Build collision list = plots + lockers in this house.
+    local detail = lib.callback.await("pickle_drugs:getHouseDetail", false, data.houseId) or {}
+    local existing = {}
+    for _, p in ipairs(detail.entities or {}) do existing[#existing + 1] = p end
+    for _, l in ipairs(detail.lockers or {}) do existing[#existing + 1] = l end
+
+    Housing.StartPlacement({
+        houseId  = data.houseId,
+        zones    = interior.zones,
+        model    = kindCfg.model,
+        existing = existing,
+        onConfirm = function(res)
+            TriggerServerEvent("pickle_drugs:createHouseStorage",
+                data.houseId, res.zoneId, data.kind,
+                res.cx, res.cy, res.sizeX, res.sizeY, res.rotIndex)
+        end,
+        onCancel = function() end,
+    })
+end)
+
+RegisterNUICallback("houseDeleteStorage", function(data, cb)
+    cb({ ok = true })
+    if not data or not data.lockerId then return end
+    TriggerServerEvent("pickle_drugs:deleteHouseStorage", data.lockerId)
+end)
+
+RegisterNUICallback("houseStartMoveStorage", function(data, cb)
+    cb({ ok = true })
+    if not data or not data.lockerId then return end
+    if Storage and Storage.MoveLocker then Storage.MoveLocker(data.lockerId) end
+end)
+
+--- Inventory-driven placement entry. Triggered when the player "uses" a
+--- planter item — the bridge calls into the grow server, which forwards
+--- the open to this client. Mirrors the NUI's "Place an entity" flow but
+--- doesn't require the manage panel to be open.
+RegisterNetEvent("pickle_drugs:openPotPlacement", function()
+    local houseId = InsideHouseId
+    if not houseId then
+        lib.notify({
+            title = "Place planter",
+            description = "You need to be inside a property to plant.",
+            type = "error",
+        })
+        return
+    end
+    local h = Houses[houseId]
+    local interior = h and Interiors[h.interior_id]
+    if not interior or not interior.zones or #interior.zones == 0 then
+        lib.notify({
+            title = "Place planter",
+            description = "This property has no zones to place in.",
+            type = "error",
+        })
+        return
+    end
+
+    local drugs = lib.callback.await("pickle_drugs:listDrugs", false) or {}
+    if #drugs == 0 then
+        lib.notify({ title = "Place planter", description = "No drugs configured.", type = "error" })
+        return
+    end
+    -- Single-drug servers (the common case today) auto-pick. With more
+    -- than one drug we surface an ox_lib picker so the player chooses
+    -- what to plant before placing.
+    local drug
+    if #drugs == 1 then
+        drug = drugs[1].id
+    else
+        local options = {}
+        for _, d in ipairs(drugs) do
+            options[#options + 1] = { value = d.id, label = d.label }
+        end
+        local picked = lib.inputDialog("Plant which?", {
+            { type = "select", label = "Drug", options = options, required = true },
+        })
+        if not picked or not picked[1] then return end
+        drug = picked[1]
+    end
+
+    local drugCfg = Config.Drugs[drug]
+    local model = (drugCfg and drugCfg.placementModel) or "pickle_pot_01"
+
+    local detail = lib.callback.await("pickle_drugs:getHouseDetail", false, houseId) or {}
+    local existing = {}
+    for _, p in ipairs(detail.entities or {}) do existing[#existing + 1] = p end
+    for _, l in ipairs(detail.lockers or {}) do existing[#existing + 1] = l end
+
+    Housing.StartPlacement({
+        houseId  = houseId,
+        zones    = interior.zones,
+        model    = model,
+        existing = existing,
+        onConfirm = function(res)
+            TriggerServerEvent("pickle_drugs:createHousePlot",
+                houseId, res.zoneId, drug,
+                res.cx, res.cy, res.sizeX, res.sizeY, res.rotIndex)
+        end,
+        onCancel = function() end,
+    })
+end)
+
 RegisterNUICallback("houseStartPlacement", function(data, cb)
     cb({ ok = true })
     if not data or not data.houseId or not data.drug then return end
@@ -985,13 +1226,20 @@ RegisterNUICallback("houseStartPlacement", function(data, cb)
     -- drug ships with a different base.
     local drugCfg = Config.Drugs[data.drug]
     local model = (drugCfg and drugCfg.placementModel) or "pickle_pot_01"
-    -- Re-fetch the latest entities so collision is current.
+    -- Re-fetch the latest entities so collision is current. The
+    -- preview must include both plots and storage lockers — they share
+    -- the same zone grid and the server-side validator rejects overlaps
+    -- across types, so omitting one would let the client paint a green
+    -- footprint over occupied cells and surprise-reject on confirm.
     local detail = lib.callback.await("pickle_drugs:getHouseDetail", false, data.houseId) or {}
+    local existing = {}
+    for _, p in ipairs(detail.entities or {}) do existing[#existing + 1] = p end
+    for _, l in ipairs(detail.lockers or {}) do existing[#existing + 1] = l end
     Housing.StartPlacement({
         houseId  = data.houseId,
         zones    = interior.zones,
         model    = model,
-        existing = detail.entities or {},
+        existing = existing,
         onConfirm = function(res)
             TriggerServerEvent("pickle_drugs:createHousePlot",
                 data.houseId, res.zoneId, data.drug,
@@ -1004,8 +1252,12 @@ end)
 -- ─── Boot fetch (catch-up after hot reload) ───────────────────────────────
 
 CreateThread(function()
+    -- Pull the housing snapshot the instant ox_lib is ready. The 1.5s
+    -- pad here used to mask boot ordering bugs; the entity heal loop
+    -- now covers that, and removing the pad lets renderers (grow,
+    -- storage) see Houses populated within a frame of script start
+    -- instead of a second and a half later.
     while not lib do Wait(0) end
-    Wait(1500)
     local data = lib.callback.await("pickle_drugs:listHousing", false) or {}
     for _, i in ipairs(data.interiors or {}) do
         Interiors[i.id] = i
@@ -1017,6 +1269,32 @@ CreateThread(function()
         local interior = Interiors[h.interior_id]
         if interior and interior.kind == "mlo" then
             refreshInteriorTargets(h)
+        end
+    end
+    -- Housing data just landed — every renderer (plots, lockers, future
+    -- kinds) checks `Housing.GetHouse` in shouldRender, and they may
+    -- have parked their entities in pending while this thread was
+    -- still fetching. Drain now so they spawn this frame instead of
+    -- waiting for the next heal tick.
+    if PickleEntity and PickleEntity.ReevaluateAll then
+        PickleEntity.ReevaluateAll()
+    end
+    -- After a hot restart the script's CurrentBucketHouse is nil, but
+    -- the server still has the player bucketed in. Ask it which house
+    -- (if any) we're inside and restore the linkage so the in-house
+    -- ox_target prompts and plot rendering come back without forcing
+    -- the player to leave + re-enter.
+    local currentHouseId = lib.callback.await("pickle_drugs:getCurrentHouse", false)
+    if currentHouseId then
+        local h = Houses[currentHouseId]
+        if h then
+            local interior = Interiors[h.interior_id]
+            if interior and interior.kind ~= "mlo" then
+                CurrentBucketHouse = h.id
+            end
+            InsideHouseId = h.id
+            refreshInteriorTargets(h)
+            TriggerEvent("pickle_drugs:enteredHouse", h.id)
         end
     end
 end)

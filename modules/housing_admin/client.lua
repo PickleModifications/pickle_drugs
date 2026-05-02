@@ -232,53 +232,66 @@ local function rectsOverlap(ax1, ay1, ax2, ay2, bx1, by1, bx2, by2)
        and ay1 < by2 - 1e-6 and by1 + 1e-6 < ay2
 end
 
---- Returns a set of cell-index keys (in world cells: floor(x/cell)) that
---- belong to existing zones, excluding `excludeIndex`. Used to flag overlap
---- live during the zone picker.
-local function existingZoneCellSet(excludeIndex)
-    local out = {}
-    local cell = gridCell()
-    for i, z in ipairs(Preview.zones) do
-        if i ~= excludeIndex and z.xCells and z.yCells and z.origin then
-            local zCell = z.cell or cell
-            -- Only same-cell-size zones share a grid; otherwise we fall back
-            -- to AABB checks.
-            if math.abs(zCell - cell) < 1e-4 then
-                local x0 = z.origin.x - z.xCells * zCell / 2
-                local y0 = z.origin.y - z.yCells * zCell / 2
-                local cx0 = math.floor((x0 + 1e-4) / cell)
-                local cy0 = math.floor((y0 + 1e-4) / cell)
-                for ix = 0, z.xCells - 1 do
-                    for iy = 0, z.yCells - 1 do
-                        out[(cx0 + ix) .. ":" .. (cy0 + iy)] = true
-                    end
-                end
-            end
-        end
+--- Returns the four world-space corners of a cell at zone-local index
+--- `(relCx, relCy)`. Cells are centre-anchored: cell (0, 0)'s centre sits
+--- at `(originWx, originWy)`, and cell (relCx, relCy)'s centre sits at
+--- local `(relCx * cell, relCy * cell)`. The whole frame rotates by
+--- `rotRad` around `(originWx, originWy)`.
+local function cellWorldCorners(originWx, originWy, relCx, relCy, cell, rotRad)
+    local cx, cy = relCx * cell, relCy * cell
+    local half = cell / 2 - 0.02
+    local lx0, ly0 = cx - half, cy - half
+    local lx1, ly1 = cx + half, cy + half
+    local cosR, sinR = math.cos(rotRad), math.sin(rotRad)
+    local function R(lx, ly)
+        return originWx + cosR * lx - sinR * ly,
+               originWy + sinR * lx + cosR * ly
     end
-    return out
+    local x1, y1 = R(lx0, ly0)
+    local x2, y2 = R(lx1, ly0)
+    local x3, y3 = R(lx1, ly1)
+    local x4, y4 = R(lx0, ly1)
+    return x1, y1, x2, y2, x3, y3, x4, y4
 end
 
---- AABB-based fallback for zones whose cell size doesn't match the active
---- grid (rare — kept defensive in case legacy zones exist with old cell
---- sizes). Returns true if the cell at (cx, cy) intersects any existing
---- zone outside `excludeIndex`.
-local function cellHitsExistingAabb(cx, cy, excludeIndex)
-    local cell = gridCell()
-    local ax1, ay1 = cx * cell, cy * cell
-    local ax2, ay2 = ax1 + cell, ay1 + cell
-    for i, z in ipairs(Preview.zones) do
-        if i ~= excludeIndex and z.xCells and z.yCells and z.origin then
-            local zCell = z.cell or cell
-            if math.abs(zCell - cell) >= 1e-4 then
-                local bx1, by1, bx2, by2 = zoneAabb(z)
-                if rectsOverlap(ax1, ay1, ax2, ay2, bx1, by1, bx2, by2) then
-                    return true
-                end
-            end
-        end
+--- Renders a single cell as a low translucent box. Built from DrawPoly so
+--- we can rotate the cell around the zone origin (DrawBox is axis-aligned
+--- and can't honour the zone's heading). Walls are drawn so the cell
+--- reads as a 3D extrusion rather than a flat tile.
+local function drawCellBox(originWx, originWy, relCx, relCy, z, cell, rotRad, height, color, alpha)
+    local x1, y1, x2, y2, x3, y3, x4, y4 =
+        cellWorldCorners(originWx, originWy, relCx, relCy, cell, rotRad)
+    local r, g, b = color.r, color.g, color.b
+    local zb, zt = z + 0.02, z + height
+
+    local function quad(ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz)
+        DrawPoly(ax, ay, az, bx, by, bz, cx, cy, cz, r, g, b, alpha)
+        DrawPoly(ax, ay, az, cx, cy, cz, dx, dy, dz, r, g, b, alpha)
+        DrawPoly(cx, cy, cz, bx, by, bz, ax, ay, az, r, g, b, alpha)
+        DrawPoly(dx, dy, dz, cx, cy, cz, ax, ay, az, r, g, b, alpha)
     end
-    return false
+
+    -- Top + bottom faces.
+    quad(x1, y1, zb, x2, y2, zb, x3, y3, zb, x4, y4, zb)
+    quad(x1, y1, zt, x2, y2, zt, x3, y3, zt, x4, y4, zt)
+    -- Four side walls (each a vertical quad between two adjacent corners).
+    quad(x1, y1, zb, x2, y2, zb, x2, y2, zt, x1, y1, zt)
+    quad(x2, y2, zb, x3, y3, zb, x3, y3, zt, x2, y2, zt)
+    quad(x3, y3, zb, x4, y4, zb, x4, y4, zt, x3, y3, zt)
+    quad(x4, y4, zb, x1, y1, zb, x1, y1, zt, x4, y4, zt)
+end
+
+--- Loose AABB enclosing the rotated cell's footprint. Used for overlap
+--- detection against existing zones; loose-but-no-false-negatives is fine
+--- for the picker's red/green feedback.
+local function cellAabbBounds(originWx, originWy, relCx, relCy, cell, rotRad)
+    local x1, y1, x2, y2, x3, y3, x4, y4 =
+        cellWorldCorners(originWx, originWy, relCx, relCy, cell, rotRad)
+    local minX = math.min(x1, x2, x3, x4)
+    local maxX = math.max(x1, x2, x3, x4)
+    local minY = math.min(y1, y2, y3, y4)
+    local maxY = math.max(y1, y2, y3, y4)
+    return minX, minY, maxX, maxY
 end
 
 --- Builds a map of "cx:cy" → count, counting how many active draft zones
@@ -313,21 +326,29 @@ end
 
 local function drawZoneCellsWithOverlap(z, occ, empty, invalid)
     local cell = z.cell or gridCell()
+    local rotDeg = (z.origin and z.origin.w) or 0.0
+    local rotRad = math.rad(rotDeg)
+    -- Cells are centre-anchored relative to the zone's stored origin
+    -- (z.origin.x, z.origin.y is the world centre of the bounding rect).
+    -- Cell (ix, iy)'s centre offset from origin in local coords is
+    -- ((ix - (xCells-1)/2) * cell, (iy - (yCells-1)/2) * cell).
+    local axisAligned = math.abs((rotDeg % 360 + 360) % 360) < 1e-3
     local x0 = z.origin.x - z.xCells * cell / 2
     local y0 = z.origin.y - z.yCells * cell / 2
-    local cx0 = math.floor((x0 + 1e-4) / cell)
-    local cy0 = math.floor((y0 + 1e-4) / cell)
+    local cx0 = axisAligned and math.floor((x0 + 1e-4) / cell) or 0
+    local cy0 = axisAligned and math.floor((y0 + 1e-4) / cell) or 0
+    local hx = (z.xCells - 1) / 2
+    local hy = (z.yCells - 1) / 2
     for ix = 0, z.xCells - 1 do
         for iy = 0, z.yCells - 1 do
-            local k = (cx0 + ix) .. ":" .. (cy0 + iy)
-            local hits = (occ[k] or 0) >= 2
+            local hits = false
+            if axisAligned then
+                hits = (occ[(cx0 + ix) .. ":" .. (cy0 + iy)] or 0) >= 2
+            end
             local color = hits and invalid or empty
             local alpha = hits and 200 or 80
-            DrawBox(
-                x0 + ix * cell + 0.02,         y0 + iy * cell + 0.02,         z.origin.z + 0.02,
-                x0 + (ix + 1) * cell - 0.02,   y0 + (iy + 1) * cell - 0.02,   z.origin.z + 0.1,
-                color.r, color.g, color.b, alpha
-            )
+            drawCellBox(z.origin.x, z.origin.y, ix - hx, iy - hy,
+                z.origin.z, cell, rotRad, 0.1, color, alpha)
         end
     end
 end
@@ -600,6 +621,8 @@ RegisterNUICallback("drugsAdminSwitchTab", function(data, cb)
         open("houses")
     elseif data.tab == "interiors" then
         open("interiors")
+    elseif data.tab == "dealing" then
+        open("dealing")
     end
 end)
 
@@ -634,48 +657,62 @@ end)
 -- native help text. Cells overlapping any existing zone are flagged red so
 -- the admin can shrink/move the bounds before confirming.
 
-local function drawCellBox(x0, y0, z, cell, height, color, alpha)
-    DrawBox(
-        x0 + 0.02,         y0 + 0.02,         z + 0.02,
-        x0 + cell - 0.02,  y0 + cell - 0.02,  z + height,
-        color.r, color.g, color.b, alpha
-    )
+--- Returns true if the cell whose AABB is `[x1,y1] .. [x2,y2]` overlaps
+--- any existing draft zone outside `excludeZoneIndex`. Zones are arbitrary
+--- world rectangles now (origin is no longer snapped to a global grid),
+--- so overlap is purely AABB-based.
+local function cellAabbHitsExisting(x1, y1, x2, y2, excludeZoneIndex)
+    for i, z in ipairs(Preview.zones) do
+        if i ~= excludeZoneIndex and z.xCells and z.yCells and z.origin then
+            local bx1, by1, bx2, by2 = zoneAabb(z)
+            if rectsOverlap(x1, y1, x2, y2, bx1, by1, bx2, by2) then
+                return true
+            end
+        end
+    end
+    return false
 end
 
---- Draws the new zone's cells. Cells overlapping any existing zone (other
---- than `excludeZoneIndex`) are painted in `invalidColor`; the origin cell
---- is highlighted in `validColor`; remaining cells use `emptyColor`.
---- Returns true if any cell collides with an existing zone.
-local function drawNewZoneCells(minCx, minCy, xCells, yCells, originCx, originCy, z, excludeZoneIndex)
+--- Draws the new zone's cells anchored at world-space `(originWx, originWy)`
+--- and rotated by `rotDeg`. Cells overlapping any existing zone (other than
+--- `excludeZoneIndex`) are painted invalid; the origin cell (relative 0,0)
+--- is highlighted; the rest use empty. Returns true if any cell collides.
+local function drawNewZoneCells(originWx, originWy, minCx, minCy, xCells, yCells, z, rotDeg, excludeZoneIndex)
     local cfg = (Config.Housing and Config.Housing.placement) or {}
     local valid   = cfg.validColor   or { r = 80,  g = 200, b = 120 }
     local invalid = cfg.invalidColor or { r = 230, g = 80,  b = 80  }
     local empty   = cfg.emptyColor   or { r = 220, g = 220, b = 220 }
     local cell = gridCell()
-    local cellSet = existingZoneCellSet(excludeZoneIndex)
+    local rotRad = math.rad(rotDeg or 0)
     local anyOverlap = false
     for ix = 0, xCells - 1 do
         for iy = 0, yCells - 1 do
-            local cx, cy = minCx + ix, minCy + iy
-            local hits = cellSet[cx .. ":" .. cy] or cellHitsExistingAabb(cx, cy, excludeZoneIndex)
+            local relCx, relCy = minCx + ix, minCy + iy
+            local x1, y1, x2, y2 = cellAabbBounds(originWx, originWy, relCx, relCy, cell, rotRad)
+            local hits = cellAabbHitsExisting(x1, y1, x2, y2, excludeZoneIndex)
             local color, alpha
             if hits then
                 color, alpha = invalid, 220
                 anyOverlap = true
-            elseif cx == originCx and cy == originCy then
+            elseif relCx == 0 and relCy == 0 then
                 color, alpha = valid, 220
             else
                 color, alpha = empty, 160
             end
-            drawCellBox(cx * cell, cy * cell, z, cell, 0.1, color, alpha)
+            drawCellBox(originWx, originWy, relCx, relCy, z, cell, rotRad, 0.1, color, alpha)
         end
     end
     return anyOverlap
 end
 
 --- Picks a zone area. Returns { origin = {x,y,z,w}, xCells, yCells } or nil.
---- `excludeZoneIndex` lets the caller mark the zone being re-picked so it
---- isn't compared against itself for overlap.
+--- The origin world position is the first click — the zone is NOT snapped
+--- to a global grid. Rotation is configured DURING the origin phase by
+--- scrolling (Shift = coarse 22.5° steps, Ctrl = fine 1° steps, default
+--- 5°); LMB locks the origin + rotation. After that, only bounds extend
+--- via the cursor; rotation no longer changes until RMB resets origin.
+--- `excludeZoneIndex` marks the zone being re-picked so it isn't compared
+--- against itself for overlap.
 local function pickZoneArea(excludeZoneIndex)
     InPlacement = true
     minimizeForGizmo()
@@ -683,15 +720,18 @@ local function pickZoneArea(excludeZoneIndex)
     SendNUIMessage({ action = "openZonePickerHud", data = { phase = "origin" } })
 
     local cell = gridCell()
-    local origin = nil       -- { cx, cy, z } once placed; cell at (cx, cy)
+    -- origin once placed: { wx, wy, z } in world coords AND a captured
+    -- rotDeg. Cells are centre-anchored: cell (0, 0)'s centre sits at
+    -- (origin.wx, origin.wy). Cell (relCx, relCy)'s centre is at local
+    -- (relCx*cell, relCy*cell), rotated by rotDeg around origin.
+    local origin = nil
+    local rotDeg = 0.0
     local result = nil
-    local lastPhase, lastX, lastY, lastInvalid = "origin", 1, 1, false
+    local lastPhase, lastX, lastY, lastInvalid, lastRot = "origin", 1, 1, false, -1
 
     while true do
         Wait(0)
         local cursor = raycastFromCamera(200.0)
-        local cursorCx = math.floor(cursor.x / cell)
-        local cursorCy = math.floor(cursor.y / cell)
 
         DisableControlAction(0, 24,  true)
         DisableControlAction(0, 25,  true)
@@ -700,57 +740,104 @@ local function pickZoneArea(excludeZoneIndex)
         DisableControlAction(0, 199, true)
         DisableControlAction(0, 200, true)
         DisableControlAction(0, 322, true)
+        DisableControlAction(0, 14,  true) -- scroll prev
+        DisableControlAction(0, 15,  true) -- scroll next
+        DisableControlAction(0, 21,  true) -- LSHIFT
+        DisableControlAction(0, 36,  true) -- LCTRL
         if IsPauseMenuActive() then
             SetFrontendActive(false)
             ActivateFrontendMenu(`FE_MENU_VERSION_EMPTY_NO_BACKGROUND`, true, -1)
         end
 
         if origin == nil then
-            local invalid = drawNewZoneCells(cursorCx, cursorCy, 1, 1, cursorCx, cursorCy, cursor.z, excludeZoneIndex)
-            if lastPhase ~= "origin" or lastInvalid ~= invalid then
-                lastPhase, lastInvalid = "origin", invalid
+            -- Origin phase: rotation is editable here. Scroll wheel
+            -- rotates the preview cell around the cursor; modifiers
+            -- tune the step (Shift coarse, Ctrl fine).
+            local step = 5.0
+            if IsDisabledControlPressed(0, 21) then step = 22.5 end
+            if IsDisabledControlPressed(0, 36) then step = 1.0  end
+            if IsDisabledControlJustPressed(0, 14) then
+                rotDeg = (rotDeg - step) % 360
+            elseif IsDisabledControlJustPressed(0, 15) then
+                rotDeg = (rotDeg + step) % 360
+            end
+
+            -- Single 1×1 cell centred at the cursor, rotated around it.
+            local invalid = drawNewZoneCells(cursor.x, cursor.y, 0, 0, 1, 1, cursor.z, rotDeg, excludeZoneIndex)
+            if lastPhase ~= "origin" or lastInvalid ~= invalid or lastRot ~= rotDeg then
+                lastPhase, lastInvalid, lastRot = "origin", invalid, rotDeg
                 SendNUIMessage({
                     action = "updateZonePickerHud",
-                    data   = { phase = "origin", invalid = invalid },
+                    data   = { phase = "origin", invalid = invalid, rotDeg = rotDeg },
                 })
             end
 
             if IsDisabledControlJustReleased(0, 24) and not invalid then
-                origin = { cx = cursorCx, cy = cursorCy, z = cursor.z }
+                origin = { wx = cursor.x, wy = cursor.y, z = cursor.z }
             elseif IsDisabledControlJustReleased(0, 199)
                 or IsDisabledControlJustReleased(0, 200)
                 or IsDisabledControlJustReleased(0, 322) then
                 break
             end
         else
-            local minCx = math.min(origin.cx, cursorCx)
-            local minCy = math.min(origin.cy, cursorCy)
-            local maxCx = math.max(origin.cx, cursorCx)
-            local maxCy = math.max(origin.cy, cursorCy)
+            -- Bounds phase: rotation locked, only bounds extend.
+            -- Inverse-rotate the cursor displacement from the origin,
+            -- then round to nearest cell index in the centre-anchored
+            -- convention (cell n covers [n - 0.5, n + 0.5] * cell).
+            local rotRad = math.rad(rotDeg)
+            local cosR, sinR = math.cos(rotRad), math.sin(rotRad)
+            local dx, dy = cursor.x - origin.wx, cursor.y - origin.wy
+            local localX =  cosR * dx + sinR * dy
+            local localY = -sinR * dx + cosR * dy
+            local cursorCx = math.floor(localX / cell + 0.5)
+            local cursorCy = math.floor(localY / cell + 0.5)
+
+            local minCx = math.min(0, cursorCx)
+            local minCy = math.min(0, cursorCy)
+            local maxCx = math.max(0, cursorCx)
+            local maxCy = math.max(0, cursorCy)
             local xCells = maxCx - minCx + 1
             local yCells = maxCy - minCy + 1
-            local invalid = drawNewZoneCells(minCx, minCy, xCells, yCells, origin.cx, origin.cy, origin.z, excludeZoneIndex)
 
-            if lastPhase ~= "bounds" or lastX ~= xCells or lastY ~= yCells or lastInvalid ~= invalid then
-                lastPhase, lastX, lastY, lastInvalid = "bounds", xCells, yCells, invalid
+            local invalid = drawNewZoneCells(origin.wx, origin.wy, minCx, minCy, xCells, yCells, origin.z, rotDeg, excludeZoneIndex)
+
+            if lastPhase ~= "bounds" or lastX ~= xCells or lastY ~= yCells
+               or lastInvalid ~= invalid or lastRot ~= rotDeg
+            then
+                lastPhase, lastX, lastY, lastInvalid, lastRot = "bounds", xCells, yCells, invalid, rotDeg
                 SendNUIMessage({
                     action = "updateZonePickerHud",
-                    data   = { phase = "bounds", xCells = xCells, yCells = yCells, cell = cell, invalid = invalid },
+                    data   = {
+                        phase   = "bounds",
+                        xCells  = xCells,
+                        yCells  = yCells,
+                        cell    = cell,
+                        invalid = invalid,
+                        rotDeg  = rotDeg,
+                    },
                 })
             end
 
             if IsDisabledControlJustReleased(0, 24) and not invalid then
-                local centerX = (minCx + maxCx + 1) / 2.0 * cell
-                local centerY = (minCy + maxCy + 1) / 2.0 * cell
+                -- Stored zone origin is the world centre of the bounding
+                -- rect. The centre offset from the click point in the
+                -- zone's local frame is ((minCx+maxCx)/2, (minCy+maxCy)/2)
+                -- * cell; we rotate that back into world.
+                local lcx = (minCx + maxCx) / 2.0 * cell
+                local lcy = (minCy + maxCy) / 2.0 * cell
+                local centerX = origin.wx + cosR * lcx - sinR * lcy
+                local centerY = origin.wy + sinR * lcx + cosR * lcy
                 result = {
-                    origin = { x = centerX, y = centerY, z = origin.z, w = 0.0 },
+                    origin = { x = centerX, y = centerY, z = origin.z, w = rotDeg },
                     xCells = xCells,
                     yCells = yCells,
                     cell   = cell,
                 }
                 break
             elseif IsDisabledControlJustReleased(0, 25) then
+                -- RMB resets the origin and unlocks rotation again.
                 origin = nil
+                rotDeg = 0.0
             elseif IsDisabledControlJustReleased(0, 199)
                 or IsDisabledControlJustReleased(0, 200)
                 or IsDisabledControlJustReleased(0, 322) then

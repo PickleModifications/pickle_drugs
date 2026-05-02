@@ -5,7 +5,7 @@
 // and "Place Entity" (initiates the grid-based placement flow).
 
 import { useEffect, useState } from "react";
-import { Building, DollarSign, Users, X, Sprout, Hammer, Trash2, UserPlus, Move, ListChecks } from "lucide-react";
+import { Building, DollarSign, Users, X, Sprout, Hammer, Trash2, UserPlus, Move, ListChecks, Box } from "lucide-react";
 
 import { fetchNui, useNuiEvent } from "@/lib/nui";
 import type { House, Interior, Zone } from "./HousingPanel";
@@ -15,9 +15,21 @@ type Plot = {
     drug: string;
     zone_id: string;
     cell_x: number; cell_y: number; cell_w: number; cell_h: number;
+    output_locker_id?: string | null;
 };
 
 type DrugOption = { id: string; label: string };
+
+type StorageTypeOption = { id: string; label: string; slots: number };
+
+type Locker = {
+    id: string;
+    kind: string;
+    house_id: string;
+    zone_id: string;
+    cell_x: number; cell_y: number; cell_w: number; cell_h: number;
+    slots: number;
+};
 
 type HouseEmployee = {
     id: string;
@@ -25,6 +37,9 @@ type HouseEmployee = {
     firstName: string;
     lastName: string;
     houseId: string;
+    carry?: Record<string, Record<string, number>>;
+    carryTotal?: number;
+    carryCap?: number;
 };
 
 export type HouseManageData = {
@@ -35,8 +50,10 @@ export type HouseManageData = {
     isOwner: boolean;
     isAdmin?: boolean;
     entities: Plot[];
+    lockers?: Locker[];
     zonePlots: Record<string, Plot[]>;
     drugs: DrugOption[];
+    storageTypes?: StorageTypeOption[];
     employees: HouseEmployee[];
     pedModels: string[];
 };
@@ -64,6 +81,7 @@ export function HouseManagePanel({
     onClose: () => void;
 }) {
     const { house, interior, isOwner, drugs, pedModels } = data;
+    const storageTypes = data.storageTypes || [];
     // Admins manage every house (hire/dismiss workers, place/move/remove
     // entities) regardless of ownership. canManage gates the same UI an
     // owner sees.
@@ -74,6 +92,8 @@ export function HouseManagePanel({
     const [residents, setResidents] = useState<string[]>(house.residents || []);
     const [employees, setEmployees] = useState<HouseEmployee[]>(data.employees || []);
     const [entities, setEntities] = useState<Plot[]>(data.entities || []);
+    const [lockers, setLockers] = useState<Locker[]>(data.lockers || []);
+    const [selectedStorage, setSelectedStorage] = useState<string>(storageTypes[0]?.id ?? "");
     const [hireModel, setHireModel] = useState<string>(pedModels?.[0] ?? "");
     const [hireFirst, setHireFirst] = useState("");
     const [hireLast, setHireLast] = useState("");
@@ -85,6 +105,22 @@ export function HouseManagePanel({
     useEffect(() => {
         setEntities(data.entities || []);
     }, [data.entities]);
+
+    useEffect(() => {
+        setLockers(data.lockers || []);
+    }, [data.lockers]);
+
+    useEffect(() => {
+        if (!selectedStorage && storageTypes[0]) setSelectedStorage(storageTypes[0].id);
+    }, [storageTypes, selectedStorage]);
+
+    useNuiEvent<{ lockers: Locker[] }>("houseLockersList", (d) => {
+        if (d?.lockers) setLockers(d.lockers);
+    });
+
+    useEffect(() => {
+        setResidents(house.residents || []);
+    }, [house.residents]);
 
     useNuiEvent<{ employees: HouseEmployee[] }>("houseEmployeesList", (d) => {
         if (d?.employees) setEmployees(d.employees);
@@ -137,6 +173,22 @@ export function HouseManagePanel({
     const deletePlot = (plotId: string) => {
         fetchNui("houseDeletePlot", { plotId });
     };
+
+    const startStorage = () => {
+        if (!selectedStorage) return;
+        fetchNui("houseStartStorage", { houseId: house.id, kind: selectedStorage });
+    };
+
+    const moveLocker = (lockerId: string) => {
+        fetchNui("houseStartMoveStorage", { lockerId });
+    };
+
+    const deleteLocker = (lockerId: string) => {
+        fetchNui("houseDeleteStorage", { lockerId });
+    };
+
+    const storageLabelFor = (kind: string) =>
+        storageTypes.find((s) => s.id === kind)?.label ?? kind;
 
     const drugLabelFor = (id: string) =>
         drugs.find((d) => d.id === id)?.label ?? id;
@@ -352,9 +404,30 @@ export function HouseManagePanel({
                                         <span className="text-[10px] text-white/40 truncate">
                                             {p.zone_id} · {p.cell_x},{p.cell_y}
                                         </span>
+                                        {/* Output destination — workers carry harvested goods to
+                                            the selected locker. "—" leaves the plot unrouted; the
+                                            worker hoards harvest until a destination is assigned. */}
+                                        <select
+                                            value={p.output_locker_id || ""}
+                                            onChange={(e) =>
+                                                fetchNui("housePlotSetOutput", {
+                                                    plotId: p.id,
+                                                    lockerId: e.target.value || null,
+                                                })
+                                            }
+                                            title="Worker output destination"
+                                            className="ml-auto bg-white/[0.04] ring-1 ring-white/10 rounded px-1.5 py-0.5 text-[10px] text-white/80 outline-none focus:ring-emerald-400/50"
+                                        >
+                                            <option value="" className="bg-neutral-900">— no output</option>
+                                            {lockers.map((l) => (
+                                                <option key={l.id} value={l.id} className="bg-neutral-900">
+                                                    {storageLabelFor(l.kind)} · {l.zone_id}
+                                                </option>
+                                            ))}
+                                        </select>
                                         <button onClick={() => movePlot(p.id)}
                                             title="Move"
-                                            className="ml-auto h-6 w-6 inline-flex items-center justify-center rounded ring-1 ring-white/15 text-white/70 hover:text-emerald-200 hover:bg-emerald-500/15">
+                                            className="h-6 w-6 inline-flex items-center justify-center rounded ring-1 ring-white/15 text-white/70 hover:text-emerald-200 hover:bg-emerald-500/15">
                                             <Move className="h-3.5 w-3.5" />
                                         </button>
                                         <button onClick={() => deletePlot(p.id)}
@@ -368,26 +441,104 @@ export function HouseManagePanel({
                         </div>
                     )}
 
+                    {/* Placed lockers — move/remove */}
+                    {house.tenure !== "none" && (data.canAccess || canManage) && (
+                        <div className="rounded-lg bg-white/[0.03] ring-1 ring-white/10 p-3 space-y-2">
+                            <div className="flex items-center gap-2 text-white/85">
+                                <Box className="h-4 w-4" />
+                                <span className="text-sm font-medium">Storage lockers</span>
+                                <span className="text-[11px] text-white/40">
+                                    · {lockers.length}
+                                </span>
+                            </div>
+                            <div className="space-y-1">
+                                {lockers.length === 0 && (
+                                    <span className="text-[11px] italic text-white/40">
+                                        No lockers placed yet. Use "Place a locker" below.
+                                    </span>
+                                )}
+                                {lockers.map((l) => (
+                                    <div key={l.id} className="flex items-center gap-2 rounded-md bg-white/[0.04] ring-1 ring-white/10 px-2.5 py-1.5">
+                                        <span className="text-sm text-white/90">{storageLabelFor(l.kind)}</span>
+                                        <span className="text-[10px] text-white/40 truncate">
+                                            {l.zone_id} · {l.cell_x},{l.cell_y} · {l.slots} slots
+                                        </span>
+                                        <button onClick={() => moveLocker(l.id)}
+                                            title="Move"
+                                            className="ml-auto h-6 w-6 inline-flex items-center justify-center rounded ring-1 ring-white/15 text-white/70 hover:text-emerald-200 hover:bg-emerald-500/15">
+                                            <Move className="h-3.5 w-3.5" />
+                                        </button>
+                                        <button onClick={() => deleteLocker(l.id)}
+                                            title="Remove"
+                                            className="h-6 w-6 inline-flex items-center justify-center rounded ring-1 ring-white/15 text-white/55 hover:text-red-300 hover:bg-red-500/15">
+                                            <Trash2 className="h-3.5 w-3.5" />
+                                        </button>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Storage placement */}
+                    {house.tenure !== "none" && (data.canAccess || canManage) && storageTypes.length > 0 && (
+                        <div className="rounded-lg bg-white/[0.03] ring-1 ring-white/10 p-3 space-y-2">
+                            <div className="flex items-center gap-2 text-white/85">
+                                <Box className="h-4 w-4" />
+                                <span className="text-sm font-medium">Place a locker</span>
+                            </div>
+                            {zones.length === 0 ? (
+                                <div className="text-[11px] italic text-amber-200/80">
+                                    This property's interior has no zones yet.
+                                </div>
+                            ) : (
+                                <>
+                                    <select value={selectedStorage} onChange={(e) => setSelectedStorage(e.target.value)}
+                                        className="w-full bg-white/[0.06] ring-1 ring-white/20 rounded-md px-2.5 py-1.5 text-sm text-white outline-none">
+                                        {storageTypes.map((s) => (
+                                            <option key={s.id} value={s.id} className="bg-neutral-900">
+                                                {s.label} ({s.slots} slots)
+                                            </option>
+                                        ))}
+                                    </select>
+                                    <button onClick={startStorage}
+                                        className="w-full inline-flex items-center justify-center gap-2 px-3 py-2 rounded-md ring-1 ring-emerald-400/50 bg-emerald-500/15 text-emerald-100 hover:bg-emerald-500/30 text-sm">
+                                        <Hammer className="h-4 w-4" /> Start placement
+                                    </button>
+                                </>
+                            )}
+                        </div>
+                    )}
+
                     {/* Placement */}
-                    {house.tenure !== "none" && (data.canAccess) && zones.length > 0 && (
+                    {house.tenure !== "none" && (data.canAccess || canManage) && (
                         <div className="rounded-lg bg-white/[0.03] ring-1 ring-white/10 p-3 space-y-2">
                             <div className="flex items-center gap-2 text-white/85">
                                 <Sprout className="h-4 w-4" />
                                 <span className="text-sm font-medium">Place an entity</span>
                             </div>
-                            <select value={selectedDrug} onChange={(e) => setSelectedDrug(e.target.value)}
-                                className="w-full bg-white/[0.06] ring-1 ring-white/20 rounded-md px-2.5 py-1.5 text-sm text-white outline-none">
-                                {drugs.map((d) => (
-                                    <option key={d.id} value={d.id} className="bg-neutral-900">{d.label}</option>
-                                ))}
-                            </select>
-                            <button onClick={startPlacement}
-                                className="w-full inline-flex items-center justify-center gap-2 px-3 py-2 rounded-md ring-1 ring-emerald-400/50 bg-emerald-500/15 text-emerald-100 hover:bg-emerald-500/30 text-sm">
-                                <Hammer className="h-4 w-4" /> Start placement
-                            </button>
-                            <div className="text-[11px] italic text-white/40">
-                                Aim where you want it. Snaps to grid when over a zone · scroll to rotate · E to confirm · ESC to cancel.
-                            </div>
+                            {zones.length === 0 ? (
+                                <div className="text-[11px] italic text-amber-200/80">
+                                    This property's interior has no zones yet. An admin needs to open
+                                    /drugs → Interiors → edit "{interior?.label ?? "this interior"}" and
+                                    add at least one zone before entities can be placed.
+                                </div>
+                            ) : (
+                                <>
+                                    <select value={selectedDrug} onChange={(e) => setSelectedDrug(e.target.value)}
+                                        className="w-full bg-white/[0.06] ring-1 ring-white/20 rounded-md px-2.5 py-1.5 text-sm text-white outline-none">
+                                        {drugs.map((d) => (
+                                            <option key={d.id} value={d.id} className="bg-neutral-900">{d.label}</option>
+                                        ))}
+                                    </select>
+                                    <button onClick={startPlacement}
+                                        className="w-full inline-flex items-center justify-center gap-2 px-3 py-2 rounded-md ring-1 ring-emerald-400/50 bg-emerald-500/15 text-emerald-100 hover:bg-emerald-500/30 text-sm">
+                                        <Hammer className="h-4 w-4" /> Start placement
+                                    </button>
+                                    <div className="text-[11px] italic text-white/40">
+                                        Aim where you want it. Snaps to grid when over a zone · scroll to rotate · E to confirm · ESC to cancel.
+                                    </div>
+                                </>
+                            )}
                         </div>
                     )}
                 </div>

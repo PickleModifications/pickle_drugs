@@ -14,20 +14,12 @@ local PlotsHidden = false
 -- state, so re-attaching would be wasted work.
 local AttachTarget
 
+--- Thin wrapper over PickleEntity.SafeSpawnProp so this file's existing call
+--- sites stay readable. The heavy lifting (model loading, pivot offset
+--- compensation, freezing, invincibility) lives in core/client.lua and
+--- is shared with every other entity kind.
 local function SpawnWorldProp(model, coords, heading)
-    local hash = LoadModel(model)
-    if not hash then return nil end
-    local obj = CreateObject(hash, coords.x, coords.y, coords.z, false, false, false)
-    if not obj or not DoesEntityExist(obj) then
-        SetModelAsNoLongerNeeded(hash)
-        return nil
-    end
-    SetEntityCoordsNoOffset(obj, coords.x, coords.y, coords.z, false, false, false)
-    SetEntityHeading(obj, heading)
-    FreezeEntityPosition(obj, true)
-    SetEntityInvincible(obj, true)
-    SetModelAsNoLongerNeeded(hash)
-    return obj
+    return PickleEntity.SafeSpawnProp(model, coords, heading)
 end
 
 --- Yields every entity tracked under PlotState[plotId].entities.
@@ -407,17 +399,19 @@ local function SpotFromPlot(plot)
 end
 
 --- Whether this client should render a plot, given which house we're in.
---- Plots in `_legacy` or in any mlo-kind house are always rendered (they
---- live in bucket 0). Plots in teleport-kind houses are only rendered
---- when the player is bucketed into that same house — otherwise the same
---- world coords would render N copies stacked on each other (one per
---- isolated tenant of the shared interior template).
+--- Plots in any mlo-kind house render unconditionally (they live in
+--- bucket 0). Plots in teleport-kind houses only render when the player
+--- is bucketed into that same house — otherwise the same world coords
+--- would render N copies stacked on each other (one per isolated tenant
+--- of the shared interior template). Orphan plots (no real house) are
+--- deleted server-side at boot, so we treat a missing house as a
+--- transient state and don't render until housing catches up.
 local function shouldRenderPlot(plot)
-    if not Housing then return true end
+    if not Housing then return false end
     local houseId = plot.house_id
-    if not houseId or houseId == "" or houseId == "_legacy" then return true end
+    if not houseId or houseId == "" then return false end
     local h = Housing.GetHouse(houseId)
-    if not h then return true end
+    if not h then return false end
     if h.kind == "mlo" then return true end
     return Housing.GetCurrentBucketHouseId() == houseId
 end
@@ -469,8 +463,9 @@ local function reevaluateAll()
     end
 end
 
-RegisterNetEvent("pickle_drugs:enteredHouse", function() reevaluateAll() end)
-RegisterNetEvent("pickle_drugs:leftHouse",    function() reevaluateAll() end)
+-- Re-evaluation on enteredHouse / leftHouse / houseUpdate / interiorUpdate
+-- is centralised in core/client.lua; we register the kind below so it
+-- gets called as part of PickleEntity.ReevaluateAll.
 
 RegisterNetEvent("pickle_drugs:plotRemoved", function(plotId)
     if not plotId then return end
@@ -564,10 +559,16 @@ function AttachTarget(plotId)
 end
 
 CreateThread(function()
-    -- Wait until ox_lib is ready and the streamer has every drug model
-    -- registered, then pull the initial snapshot.
+    -- Fetch + apply as soon as ox_lib is ready. We used to block on
+    -- WaitForAllDrugModels here, which polled IsModelInCdimage for every
+    -- streamed drug asset — those register a beat after the resource
+    -- starts, so the wait added ~2-3s before plots even attempted to
+    -- spawn (storage doesn't pay this cost because its props are stock
+    -- GTA models). With the heal loop in core/client.lua, any model
+    -- that wasn't yet registered when the first applyOrDefer ran gets
+    -- automatically retried within 2s — the upfront wait is now
+    -- redundant work that desyncs plot spawn from locker spawn.
     while not lib do Wait(0) end
-    WaitForAllDrugModels()
     local plots = lib.callback.await("pickle_drugs:getPlots", false) or {}
     for _, plot in ipairs(plots) do
         applyOrDefer(plot)
@@ -615,3 +616,35 @@ AddEventHandler("onResourceStop", function(resourceName)
     for id in pairs(PlotState) do DespawnPlot(id) end
     PlotState = {}
 end)
+
+-- ─── Entity framework hooks ──────────────────────────────────────────────
+-- The shared Entity runtime in core/client.lua periodically calls heal()
+-- on every registered kind so entities whose first spawn failed (model
+-- not yet streamed, bucket race, etc.) recover without an explicit
+-- nudge. reevaluate() runs whenever housing / bucket / interior state
+-- changes — we drain pending plots into the live state and remove plots
+-- the player can no longer see.
+PickleEntity.RegisterKind("plot", {
+    reevaluate = function() reevaluateAll() end,
+    heal = function()
+        -- 1. Drain any plots still parked in the pending queue —
+        -- shouldRenderPlot may now return true if Housing data has
+        -- caught up.
+        for _, plot in pairs(PendingPlots) do
+            if shouldRenderPlot(plot) then applyOrDefer(plot) end
+        end
+        -- 2. Re-render rows whose pot prop is missing. Most often this
+        -- catches the first-boot streamer race where pickle_pot_01
+        -- wasn't loaded when applyOrDefer originally ran. ApplyPlotState
+        -- doesn't mutate PlotState's keyset so iterating is safe.
+        for _, s in pairs(PlotState) do
+            if s.spot and s.plot then
+                if not s.entities or not s.entities.pot
+                    or not DoesEntityExist(s.entities.pot)
+                then
+                    ApplyPlotState(s.spot, s.plot)
+                end
+            end
+        end
+    end,
+})

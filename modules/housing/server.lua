@@ -16,7 +16,6 @@ Housing = Housing or {}
 local Interiors = {}    -- id → row (parsed)
 local Houses    = {}    -- id → row (parsed; bucket included)
 local PlayersInBucket = {} -- src → bucket (so we can clear on disconnect)
-local LegacyEnsured = false
 
 local function now() return os.time() * 1000 end
 
@@ -224,12 +223,6 @@ local function houseFromRow(row)
     end
     return h
 end
-
--- Forward-declared so the getHouseDetail callback closure (registered
--- earlier in the file at module load) can see them. Their bodies live
--- alongside the boot block at the bottom of the file.
-local rebindLegacyPlots
-local LegacyRebindDone = false
 
 -- ─── Public read accessors ────────────────────────────────────────────────
 
@@ -568,7 +561,8 @@ RegisterNetEvent("pickle_drugs:saveInterior", function(payload)
     local src = source
     if not adminCheck(src) then return end
     if type(payload) ~= "table" then return end
-    local id = payload.id
+    -- Empty strings count as "no id" (see saveHouse for the rationale).
+    local id = (type(payload.id) == "string" and payload.id ~= "") and payload.id or nil
     -- The templates list is teleport-only. MLO interiors are property-owned
     -- shadow rows created via saveHouse — refuse mlo here so a malformed
     -- payload can't drop one into the templates pool.
@@ -668,6 +662,12 @@ RegisterNetEvent("pickle_drugs:saveInterior", function(payload)
         })
         broadcastInterior(row)
     end
+    -- Echo the assigned id back to the saver so the React editor can
+    -- adopt it on the first save of a brand-new draft.
+    TriggerClientEvent("pickle_drugs:interiorSaved", src, {
+        tempId = (type(payload.id) == "string" and payload.id) or "",
+        savedId = id,
+    })
     notify(src, "Interior saved", "success")
 end)
 
@@ -734,7 +734,12 @@ RegisterNetEvent("pickle_drugs:saveHouse", function(payload)
     if not adminCheck(src) then return end
     if type(payload) ~= "table" then return end
 
-    local id = payload.id
+    -- Empty strings count as "no id" — the React editor seeds drafts
+    -- with id="" and the auto-save fires it to the server before the
+    -- admin types anything. Without this normalisation the row would
+    -- be persisted under id="" and every subsequent edit would update
+    -- the same broken row.
+    local id = (type(payload.id) == "string" and payload.id ~= "") and payload.id or nil
     local existing = id and Houses[id]
     if not existing then id = id or genId("hse", Houses) end
 
@@ -834,6 +839,13 @@ RegisterNetEvent("pickle_drugs:saveHouse", function(payload)
         })
         broadcastHouse(row)
     end
+    -- Tell the saver which id the row landed under so its auto-save loop
+    -- doesn't keep re-creating ghost rows (the React draft starts with
+    -- id="" for new houses; this lets it adopt the server-assigned id).
+    TriggerClientEvent("pickle_drugs:houseSaved", src, {
+        tempId = (type(payload.id) == "string" and payload.id) or "",
+        savedId = id,
+    })
     notify(src, "House saved", "success")
 end)
 
@@ -864,6 +876,7 @@ RegisterNetEvent("pickle_drugs:deleteHouse", function(id)
     end
 
     if Grow and Grow.OnHouseDeleted then Grow.OnHouseDeleted(id) end
+    if Storage and Storage.OnHouseDeleted then Storage.OnHouseDeleted(id) end
     notify(src, "House deleted", "success")
 end)
 
@@ -881,6 +894,18 @@ end)
 --- Per-player view of one house: includes the interior, current player's
 --- citizenid (so the management panel can show whether they're owner /
 --- resident), and the placed entities in each zone.
+--- Returns the house id (if any) the player is currently bucketed into.
+--- Used by the client on hot restart to re-link to its teleport house
+--- without making the player walk back through the door.
+lib.callback.register("pickle_drugs:getCurrentHouse", function(src)
+    local bucket = PlayersInBucket[src]
+    if not bucket or bucket == 0 then return nil end
+    for _, h in pairs(Houses) do
+        if h.bucket == bucket then return h.id end
+    end
+    return nil
+end)
+
 lib.callback.register("pickle_drugs:getHouseDetail", function(src, houseId)
     -- A panel opened seconds after a hot restart will arrive here before
     -- grow's MySQL.ready and the employees roster have finished loading,
@@ -893,18 +918,22 @@ lib.callback.register("pickle_drugs:getHouseDetail", function(src, houseId)
     do
         Wait(50)
     end
-    -- Run the legacy-plot rebind on demand the first time someone opens
-    -- a house panel (rather than at a fixed delay after boot). This keeps
-    -- the migration's "must run before getHouseDetail returns" invariant
-    -- without coupling to a wall-clock guess.
-    if not LegacyRebindDone then
-        LegacyRebindDone = true
-        pcall(rebindLegacyPlots)
-    end
     local h = Houses[houseId]
     if not h then return nil end
     local interior = Interiors[h.interior_id]
     local entities = (Grow and Grow.PlotsForHouse) and Grow.PlotsForHouse(houseId) or {}
+    local lockers = {}
+    if Storage and Storage.LockersForHouse then
+        for _, l in ipairs(Storage.LockersForHouse(houseId)) do
+            lockers[#lockers + 1] = {
+                id = l.id, kind = l.kind,
+                house_id = l.house_id, zone_id = l.zone_id,
+                cell_x = l.cell_x, cell_y = l.cell_y,
+                cell_w = l.cell_w, cell_h = l.cell_h,
+                slots  = (Storage.SlotsFor and Storage.SlotsFor(l.kind)) or 0,
+            }
+        end
+    end
     return {
         house    = h,
         interior = interior,
@@ -916,77 +945,9 @@ lib.callback.register("pickle_drugs:getHouseDetail", function(src, houseId)
         -- relevant sections without forcing the admin to take ownership.
         isAdmin   = adminCheck(src),
         entities  = entities,
+        lockers   = lockers,
     }
 end)
-
--- ─── Legacy plot bridge ───────────────────────────────────────────────────
-
---- Called from grow's migration. Creates a placeholder house at world
---- origin so orphan plots can be reassigned and remain reachable. This is
---- idempotent — if the row already exists we just return it.
-function Housing.EnsureLegacyHouse()
-    if LegacyEnsured and Houses["_legacy"] then return Houses["_legacy"] end
-    LegacyEnsured = true
-    if Houses["_legacy"] then return Houses["_legacy"] end
-
-    -- Synthesize a hidden interior + house pair so the legacy row isn't a
-    -- dangling FK. The interior is mlo-kind so it doesn't try to assign a
-    -- bucket or render teleport doors.
-    if not Interiors["_legacy"] then
-        local interior = {
-            id = "_legacy", label = "Legacy World", kind = "mlo",
-            door_x = 0, door_y = 0, door_z = 0, door_w = 0,
-            exit_x = 0, exit_y = 0, exit_z = 0, exit_w = 0,
-            idle_x = 0, idle_y = 0, idle_z = 0, idle_w = 0,
-            mgmt_x = 0, mgmt_y = 0, mgmt_z = 0, mgmt_w = 0,
-            zones  = {}, mlo_polygon = nil, updated_at = now(),
-        }
-        Interiors["_legacy"] = interior
-        MySQL.insert.await([[
-            INSERT IGNORE INTO pickle_drugs_house_interiors
-                (id, label, kind,
-                 door_x, door_y, door_z, door_w,
-                 exit_x, exit_y, exit_z, exit_w,
-                 idle_x, idle_y, idle_z, idle_w,
-                 mgmt_x, mgmt_y, mgmt_z, mgmt_w,
-                 zones, mlo_polygon, updated_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-        ]], {
-            interior.id, interior.label, interior.kind,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            "[]", nil, interior.updated_at,
-        })
-    end
-
-    if not Houses["_legacy"] then
-        local h = {
-            id = "_legacy", label = "Legacy World",
-            interior_id = "_legacy",
-            door_world_x = 0, door_world_y = 0, door_world_z = 0, door_world_w = 0,
-            sale_enabled = false, sale_price = 0,
-            rent_enabled = false, rent_price = 0, rent_cycle_ms = 0,
-            owner_citizenid = nil, tenure = "none", rent_due_at = 0,
-            residents = {}, bucket = 0, updated_at = now(),
-            kind = "mlo",
-        }
-        Houses["_legacy"] = h
-        MySQL.insert.await([[
-            INSERT IGNORE INTO pickle_drugs_houses
-                (id, label, interior_id,
-                 door_world_x, door_world_y, door_world_z, door_world_w,
-                 sale_enabled, sale_price,
-                 rent_enabled, rent_price, rent_cycle_ms,
-                 owner_citizenid, tenure, rent_due_at,
-                 residents, bucket, updated_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-        ]], {
-            h.id, h.label, h.interior_id,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, nil, h.tenure, 0,
-            "[]", 0, h.updated_at,
-        })
-    end
-    return Houses["_legacy"]
-end
 
 -- ─── Boot ─────────────────────────────────────────────────────────────────
 
@@ -1054,6 +1015,22 @@ CreateThread(function()
                 )
             ]])
             loadAll()
+            -- One-shot data fix: an earlier saveHouse bug let drafts
+            -- with id="" through, persisting a house under that key.
+            -- Rename it and cascade the new id to every plot and
+            -- employee that referenced it. Idempotent — once renamed,
+            -- this branch never fires again.
+            if Houses[""] then
+                local newId = genId("hse", Houses)
+                local broken = Houses[""]
+                broken.id = newId
+                Houses[newId] = broken
+                Houses[""] = nil
+                MySQL.update.await("UPDATE pickle_drugs_houses SET id=? WHERE id=''", { newId })
+                MySQL.update.await("UPDATE pickle_drugs_entities SET house_id=? WHERE house_id=''", { newId })
+                MySQL.update.await("UPDATE pickle_drugs_employees SET house_id=? WHERE house_id=''", { newId })
+                print(("[pickle_drugs] housing: repaired empty-id house → %s (plots + employees cascaded)"):format(newId))
+            end
             -- Persist any freshly-derived buckets (rows saved before the
             -- bucket column existed will have bucket=0).
             for _, h in pairs(Houses) do
@@ -1071,53 +1048,6 @@ CreateThread(function()
         for _, h in pairs(Houses)    do TriggerClientEvent("pickle_drugs:houseUpdate",    -1, h) end
     end)
 end)
-
---- Legacy plot rebind. Plots created via the admin `/drugs` flow carry
---- `house_id = "_legacy"` (or NULL on very old rows) and never appear in
---- the per-house manage panel. This pass scans those plots and, when a
---- plot's world coords land inside one of a real house's zones, moves it
---- onto that house. Idempotent: rebound plots have a real house_id on
---- the next boot and are skipped.
-rebindLegacyPlots = function()
-    if not (Grow and Grow.GetAllServerPlots and Grow.RebindPlotToHouse) then return end
-    local plots = Grow.GetAllServerPlots() or {}
-    local rebound = 0
-    for plotId, plot in pairs(plots) do
-        local hid = plot.house_id
-        local needsRebind = (hid == nil) or (hid == "") or (hid == "_legacy")
-        if needsRebind then
-            for _, h in pairs(Houses) do
-                if h.id ~= "_legacy" then
-                    local interior = Interiors[h.interior_id]
-                    if interior and interior.zones then
-                        for _, zone in ipairs(interior.zones) do
-                            local zTol = zone.zTolerance or (Config.Housing and Config.Housing.defaultZTolerance) or 1.0
-                            if math.abs((plot.coords_z or 0) - (zone.origin and zone.origin.z or 0)) <= zTol then
-                                local cx, cy = Housing.WorldToCell(zone, plot.coords_x or 0, plot.coords_y or 0)
-                                if cx and cy then
-                                    local fw = math.max(1, tonumber(plot.cell_w) or 1)
-                                    local fh = math.max(1, tonumber(plot.cell_h) or 1)
-                                    if Grow.RebindPlotToHouse(plotId, h.id, zone.id, cx, cy, fw, fh) then
-                                        rebound = rebound + 1
-                                    end
-                                    goto next_plot
-                                end
-                            end
-                        end
-                    end
-                end
-            end
-        end
-        ::next_plot::
-    end
-    if rebound > 0 then
-        print(("[pickle_drugs] housing: rebound %d legacy plot(s) to their owning house"):format(rebound))
-    end
-end
-
--- The migration is now invoked on demand by the first getHouseDetail
--- call (after readiness flags are set), so we don't need a fixed-delay
--- CreateThread that races the player's first interaction.
 
 -- ─── Lease ticker ─────────────────────────────────────────────────────────
 

@@ -69,9 +69,8 @@ local function attachTarget(ped, empId)
     })
 end
 
---- Resolve the world-space home for the local spawn — house-bound
---- employees idle at the interior's idle point in the house's bucket;
---- legacy ones at their world coords.
+--- Resolve the world-space home for the local spawn — workers idle at
+--- their bound interior's idle point in the house's bucket.
 local function effectiveHome(emp)
     if emp.house_id and Housing and Housing.GetHouse then
         local h = Housing.GetHouse(emp.house_id)
@@ -158,10 +157,12 @@ end
 
 --- Polls the ped's distance to the work spot and fires a one-shot
 --- server event the moment the ped is within `arriveDistance`. The
---- server uses this to advance going→working without waiting on the
---- walk-duration floor. The thread self-cancels if a new task is
---- applied (entry.arriveSentinel changes) or the task changes plot.
-local function scheduleArriveSignal(empId, plotId, target)
+--- server uses this to advance going→working / going_to_locker→
+--- depositing without waiting on the walk-duration floor. The thread
+--- self-cancels if a new task is applied (entry.arriveSentinel
+--- changes). `eventName` + `targetId` switch between plot and locker
+--- arrivals — the server has matching net handlers for each.
+local function scheduleArriveSignal(empId, eventName, targetId, target)
     local entry = Peds[empId]
     if not entry then return end
     local sentinel = {}
@@ -175,7 +176,7 @@ local function scheduleArriveSignal(empId, plotId, target)
             if not e.ped or not DoesEntityExist(e.ped) then return end
             if distance(e.ped, target) <= threshold then
                 e.arriveSentinel = nil
-                TriggerServerEvent("pickle_drugs:employeeArrivedAtPlot", empId, plotId)
+                TriggerServerEvent(eventName, empId, targetId)
                 return
             end
         end
@@ -230,9 +231,19 @@ local function applyTask(empId, task)
         -- For goto tasks, also poll the ped's distance to the work spot
         -- and tell the server the moment we're close enough — that lets
         -- the scheduler skip the rest of the walk-min floor and start
-        -- the work animation immediately.
-        if task.kind == "goto" and task.plotId then
-            scheduleArriveSignal(empId, task.plotId, t)
+        -- the work animation immediately. plotId routes to the plot
+        -- handler; lockerId routes to the deposit handler. Server
+        -- validates state on its end so an unexpected ping is a no-op.
+        if task.kind == "goto" then
+            if task.plotId then
+                scheduleArriveSignal(empId,
+                    "pickle_drugs:employeeArrivedAtPlot",
+                    task.plotId, t)
+            elseif task.lockerId then
+                scheduleArriveSignal(empId,
+                    "pickle_drugs:employeeArrivedAtLocker",
+                    task.lockerId, t)
+            end
         end
     elseif task.kind == "work" then
         -- Skip restarting the scenario/anim when the previous task was
@@ -316,10 +327,9 @@ RegisterNetEvent("pickle_drugs:employeeRemoved", function(empId)
 end)
 
 --- Re-evaluate every employee's local visibility when the player moves
---- between buckets. House-bound peds in teleport interiors are only
---- spawned when the player is inside the matching bucket; legacy peds
---- never need this. We rebuild from `lib.callback` so the spawn path
---- (which knows about house bucket gating) decides whether to keep each.
+--- between buckets. Peds in teleport interiors only spawn when the
+--- player is inside the matching bucket. We rebuild from `lib.callback`
+--- so the spawn path decides whether to keep each.
 local function reevaluatePeds()
     if not lib then return end
     local list = lib.callback.await("pickle_drugs:listEmployees", false) or {}
@@ -514,75 +524,24 @@ RegisterNetEvent("pickle_drugs:employeeRemoved", function()
     if creatorOpen then pushEmployeesList() end
 end)
 
--- ─── Place / move flows (gizmo) ────────────────────────────────────────────
-
-local function placeEmployee(model, firstName, lastName)
-    if not StartGizmoEditor then return end
-    minimizeForGizmo()
-    local result = StartGizmoEditor({
-        model        = model,
-        isPed        = true,
-        enableCancel = true,
-        deleteEntity = true,
-    })
-    restoreFromGizmo()
-    if not result or not result.position then return end
-    TriggerServerEvent("pickle_drugs:createEmployee",
-        model, firstName, lastName,
-        result.position.x, result.position.y, result.position.z,
-        (result.rotation and result.rotation.z) or 0.0)
-end
-
-local function moveEmployee(empId)
-    local emp
-    for _, e in ipairs(listEmployees()) do
-        if e.id == empId then emp = e break end
-    end
-    if not emp then return end
-    minimizeForGizmo()
-    local result = StartGizmoEditor({
-        model        = emp.model,
-        isPed        = true,
-        coords       = vector3(emp.home.x, emp.home.y, emp.home.z),
-        rotation     = vector3(0.0, 0.0, emp.home.w or 0.0),
-        enableCancel = true,
-        deleteEntity = true,
-    })
-    restoreFromGizmo()
-    if not result or not result.position then return end
-    TriggerServerEvent("pickle_drugs:updateEmployeeCoords", empId,
-        result.position.x, result.position.y, result.position.z,
-        (result.rotation and result.rotation.z) or 0.0)
-end
-
 -- ─── NUI callbacks (employees panel) ──────────────────────────────────────
+-- The admin panel is read-only now: workers are created via the house
+-- "Hire" flow, moved by re-binding to a different house, and dismissed
+-- via the same panel. The /employees command stays for plot assignment.
 
 RegisterNUICallback("employeesClose", function(_, cb)
     closeEmployeesPanel()
     cb({ ok = true })
 end)
 
-RegisterNUICallback("employeesPlace", function(data, cb)
-    cb({ ok = true })
-    local model = (data and data.model) or creatorActiveModel
-    local first = (data and data.firstName) or pickRandom(FIRST_NAMES)
-    local last  = (data and data.lastName)  or pickRandom(LAST_NAMES)
-    if model and model ~= "" then creatorActiveModel = model end
-    CreateThread(function() placeEmployee(model, first, last) end)
-end)
-
-RegisterNUICallback("employeesMove", function(data, cb)
+RegisterNUICallback("employeesAssign", function(data, cb)
     cb({ ok = true })
     if data and data.empId then
-        CreateThread(function() moveEmployee(data.empId) end)
+        closeEmployeesPanel()
+        if Employees and Employees.OpenAssigner then
+            Employees.OpenAssigner(data.empId)
+        end
     end
-end)
-
-RegisterNUICallback("employeesDelete", function(data, cb)
-    if data and data.empId then
-        TriggerServerEvent("pickle_drugs:deleteEmployee", data.empId)
-    end
-    cb({ ok = true })
 end)
 
 -- ─── Plot assigner ────────────────────────────────────────────────────────

@@ -38,7 +38,12 @@ Config.Employees = {
         plant   = 4500,
         water   = 4500,
         harvest = 1000,
+        deposit = 2500, -- time spent at the destination locker per dump
     },
+    -- How many items the worker can carry before they must dump into a
+    -- destination locker. Total across all routed buckets. Reaching the
+    -- cap interrupts new harvest tasks until the worker has deposited.
+    carryCapacity = 25,
     cooldownMs   = 1000,
     walkMinMs    = 10000,
     walkMaxMs    = 15000,
@@ -134,7 +139,7 @@ Config.Housing = {
 }
 
 -- ─── Drug definitions ───────────────────────────────────────────────────────
--- Plot LOCATIONS are no longer here — they live in `pickle_drugs_plots`
+-- Plot LOCATIONS are no longer here — they live in `pickle_drugs_entities`
 -- and are CRUD-managed via the `/drugs` admin UI.
 --
 -- Each entry below is the static *recipe* for a drug type (models, stages,
@@ -145,8 +150,48 @@ Config.Housing = {
 --   modules/watering  → watering (pitcher kinematics, particles, level)
 Config.Drugs = {}
 
+-- ─── Dealing ───────────────────────────────────────────────────────────────
+-- NPC customers + dealing zones, managed via /drugs → "Dealing" tab. Players
+-- receive offers in the phone Messages app, accept / negotiate / reject,
+-- then have `completeWindowMs` to meet the customer in-world.
+Config.Dealing = {
+    -- Per-customer cooldown after a successful deal with a given player.
+    cooldownMs        = 5 * 60 * 1000,
+    -- After an expired deal, the customer goes quiet for this long for
+    -- that player. Stops "spam offer same customer if I let it expire".
+    failureCooldownMs = 10 * 60 * 1000,
+    -- Maximum quantity per offer. Server clamps to whatever the player
+    -- actually holds.
+    maxQty            = 10,
+    -- Time the player has to physically meet the customer at the deal
+    -- point after accepting.
+    completeWindowMs  = 6 * 60 * 1000,
+    -- Player counter must be ≥ this fraction of the original ask total
+    -- for the customer to accept outright. Below it, the customer
+    -- counters once between (player offer + original) / 2; below ~75%
+    -- of original they reject.
+    acceptThreshold   = 0.90,
+    -- How often the scheduler ticks looking for new offers + expiry.
+    schedulerTickMs   = 30 * 1000,
+    -- Per-player base interval between offer attempts.
+    offerIntervalMs   = 4 * 60 * 1000,
+    -- Random jitter applied to the unit price each offer (e.g. 0.15 →
+    -- ±15%). Negotiation uses the original unit price as the anchor.
+    priceJitter       = 0.15,
+    -- Distance (m) from a deal point at which the customer ped
+    -- streams in. Until the player is within this range the ped is
+    -- "pending" — only a navigation blip exists. Spawning at range
+    -- avoids a known issue where the ground-Z probe falls back to the
+    -- payload Z (admin-set zone Z) because the chunk isn't loaded,
+    -- leaving the customer floating in the air or buried in terrain.
+    streamRange       = 80.0,
+}
+
 Config.Drugs.weed = {
     label = "Weed",
+    -- Sale price per unit (cash). Multiplied by zone risk_mult and a
+    -- small jitter at offer time. Used by the Dealing scheduler.
+    deal = { basePrice = 35 },
 
     -- Item names (resolved through the inventory bridge).
     seedItem    = "weed_seed",
@@ -189,6 +234,7 @@ Config.Drugs.weed = {
     -- is re-spawned by modules/grow/client and stays put for the rest of
     -- the grow until the plant is harvested.
     planting = {
+        seedItem      = "pickle_weed_seed", -- consumed when the seed is planted
         rubble        = "pickle_soil_rubble_01",
         rubbleCount     = 4,       -- evenly spaced around the soil ring
         rubbleRadius    = 0.09,    -- spawn-ring radius from pot centre (metres)
@@ -201,7 +247,7 @@ Config.Drugs.weed = {
 
     -- Total wall-clock from "seed planted" to "fully grown". Split evenly
     -- across the pre-harvest growing stages (1..N-1).
-    totalGrowMs = 300 * 1000, -- 10 seconds total
+    totalGrowMs = 10 * 1000, -- 10 seconds total
 
     -- Water reservoir. The plant holds up to `waterCapacityMs` of growing
     -- time; it depletes by real time and growth pauses when it hits 0.
@@ -264,7 +310,7 @@ Config.Drugs.weed = {
         fadeMs      = 400,
         fallMs      = 2000,
         fallCarrier = "sf_prop_sf_apple_01a",
-        harvestItem = "weed_bud",
+        harvestItem = "pickle_weed_bud",
     },
 
     -- Watering scene parameters (consumed by modules/watering).
@@ -282,5 +328,36 @@ Config.Drugs.weed = {
         -- it — visualises the water filling the pot. Optional.
         potFx         = { dict = "core", name = "ent_amb_pouring_water_into_pot" },
         potFxZ        = 0.25,   -- vertical offset of the pot fx on the pot
+    },
+}
+
+-- ─── Inventory ────────────────────────────────────────────────────────────
+-- Fallback path for inventory item images. The active inventory bridge
+-- usually exposes its own (e.g. ox_inventory ships images under
+-- "nui://ox_inventory/web/images") — the bridge value wins; this kicks in
+-- when nothing's wired up.
+Config.Inventory = {
+    imagesPath = "nui://ox_inventory/web/images",
+}
+
+-- Shared inventory items used across every drug's grow flow. Drug-specific
+-- items (seeds, harvest output) live on the per-drug entry below. Set any
+-- of these to false/nil to skip the corresponding inventory gate.
+Config.Items = {
+    pot         = "pickle_pot",          -- consumed at plot placement
+    soilBag     = "pickle_soil_bag",     -- consumed when soil is added
+    wateringCan = "pickle_watering_can", -- required (not consumed) to water
+    scissors    = "pickle_scissors",     -- required (not consumed) to cut buds
+}
+
+-- ─── Storage ──────────────────────────────────────────────────────────────
+-- Player-placed lockers inside houses. Footprint is derived from each
+-- model's bounding box at placement time, same as plots. Slots cap how
+-- many distinct stacks the locker can hold.
+Config.Storage = {
+    types = {
+        small  = { label = "Small Locker",  model = "ch_prop_ch_service_locker_01b", slots = 10 },
+        medium = { label = "Medium Locker", model = "ch_prop_ch_service_locker_02a", slots = 25 },
+        large  = { label = "Gun Locker",    model = "gr_prop_gr_gunlocker_01a",      slots = 50 },
     },
 }

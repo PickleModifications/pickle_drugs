@@ -10,6 +10,7 @@ export type ZonePickerHudData = {
     cell?: number;
     invalid?: boolean;
     vertices?: number;
+    rotDeg?: number;
 };
 
 export function ZonePickerHud({ data }: { data: ZonePickerHudData }) {
@@ -69,6 +70,13 @@ export function ZonePickerHud({ data }: { data: ZonePickerHudData }) {
                 {isBounds && (
                     <span className="text-[11px] text-white/45 tabular-nums">
                         {data.xCells}×{data.yCells} @ {(data.cell ?? 1).toFixed(2)}m
+                        {typeof data.rotDeg === "number" &&
+                            ` · ${data.rotDeg.toFixed(data.rotDeg % 1 === 0 ? 0 : 1)}°`}
+                    </span>
+                )}
+                {!isBounds && typeof data.rotDeg === "number" && (
+                    <span className="text-[11px] text-white/45 tabular-nums">
+                        {data.rotDeg.toFixed(data.rotDeg % 1 === 0 ? 0 : 1)}°
                     </span>
                 )}
                 {invalid && (
@@ -81,6 +89,16 @@ export function ZonePickerHud({ data }: { data: ZonePickerHudData }) {
                         {isBounds ? "Confirm" : "Set origin"}
                     </span>
                 </span>
+                {!isBounds && (
+                    <>
+                        <span className="flex items-center gap-1.5">
+                            <Kbd>Scroll</Kbd> Rotate
+                        </span>
+                        <span className="text-[11px] text-white/40">
+                            <Kbd>Shift</Kbd> coarse · <Kbd>Ctrl</Kbd> fine
+                        </span>
+                    </>
+                )}
                 {isBounds && (
                     <span className="flex items-center gap-1.5">
                         <Kbd>RMB</Kbd> Reset origin

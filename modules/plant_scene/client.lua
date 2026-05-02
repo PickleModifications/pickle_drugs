@@ -168,6 +168,40 @@ local function ComputeEtaMs(plot, drugCfg)
     return left
 end
 
+--- Item the player needs to perform `action` on `drugCfg`. The plant
+--- scene doesn't know what each sub-flow consumes; this is the single
+--- source of truth so ComputeActions / StartAction / RefreshItemCounts
+--- all agree. Returns nil if the action has no item gate.
+local function RequiredItem(action, drugCfg)
+    if action == "soiling" then
+        local n = Config.Items and Config.Items.soilBag
+        if n then return { name = n, count = 1, label = "bag of soil" } end
+    elseif action == "planting" then
+        local n = drugCfg and drugCfg.planting and drugCfg.planting.seedItem
+        if n then return { name = n, count = 1, label = "seed" } end
+    elseif action == "watering" then
+        local n = Config.Items and Config.Items.wateringCan
+        if n then return { name = n, count = 1, label = "watering pitcher" } end
+    elseif action == "cutting" then
+        local n = Config.Items and Config.Items.scissors
+        if n then return { name = n, count = 1, label = "trimming scissors" } end
+    end
+    return nil
+end
+
+--- Returns true if `Scene.itemCounts` shows enough of `action`'s item.
+--- Treats a missing entry as "not yet fetched" → optimistic true so the
+--- buttons aren't briefly greyed-out on scene open before the first
+--- callback returns.
+local function PlayerHasItemFor(action, drugCfg)
+    local need = RequiredItem(action, drugCfg)
+    if not need then return true, nil end
+    if not Scene then return true, need end
+    local counts = Scene.itemCounts
+    if not counts or counts[need.name] == nil then return true, need end
+    return counts[need.name] >= need.count, need
+end
+
 local function ComputeActions(plot, drugCfg)
     local harvest = Grow.HarvestStage(drugCfg)
     local now = GetCloudTimeAsInt() * 1000
@@ -179,49 +213,67 @@ local function ComputeActions(plot, drugCfg)
     local hasBuds      = atHarvest and #Grow.RemainingBudIndexes(plot, drugCfg) > 0
     local waterFull    = Grow.WaterLevel(plot, drugCfg, now) >= 0.999
 
-    -- Move/Remove are house-only — admin /drugs plots stay manageable
-    -- through that admin panel so we don't surface them here.
-    local hid = plot.house_id
-    local inHouse = hid ~= nil and hid ~= "" and hid ~= "_legacy"
-    print(("[pickle_drugs] plant_scene ComputeActions: plot=%s house_id=%s zone_id=%s -> inHouse=%s")
-        :format(tostring(plot.id), tostring(hid), tostring(plot.zone_id), tostring(inHouse)))
-
     local function reason(text) return text end
+
+    -- "Need <label>" overrides every other reason: a player who hasn't
+    -- got the item should see *that* first, since fixing it (going to
+    -- pick up the consumable) is the actionable step.
+    local function gate(action, baseAvailable, baseReason)
+        if not baseAvailable then return baseAvailable, baseReason end
+        local ok, need = PlayerHasItemFor(action, drugCfg)
+        if not ok and need then
+            return false, reason("Need " .. need.label)
+        end
+        return baseAvailable, baseReason
+    end
+
+    local soilingOk,  soilingReason  = gate("soiling",
+        needsSoil and drugCfg.soiling ~= nil,
+        (not needsSoil) and reason("Already soiled") or nil)
+    local plantingOk, plantingReason = gate("planting",
+        needsSeed and drugCfg.planting ~= nil,
+        needsSoil and reason("Needs soil first")
+            or (not needsSeed) and reason("Already planted")
+            or nil)
+    local wateringOk, wateringReason = gate("watering",
+        (growing or (atHarvest and not waterFull)) and not waterFull and (growing or atHarvest) and drugCfg.watering ~= nil,
+        (not (growing or atHarvest)) and reason("No plant yet")
+            or waterFull and reason("Reservoir full")
+            or nil)
+    local cuttingOk,  cuttingReason  = gate("cutting",
+        hasBuds and drugCfg.cutting ~= nil,
+        (not atHarvest) and reason("Not ready to harvest")
+            or (atHarvest and not hasBuds) and reason("All buds cut")
+            or nil)
 
     return {
         {
             id = "soiling",
             label = "Add Soil",
             icon = "mound",
-            available = needsSoil and drugCfg.soiling ~= nil,
-            reason = (not needsSoil) and reason("Already soiled") or nil,
+            available = soilingOk,
+            reason = soilingReason,
         },
         {
             id = "planting",
             label = "Plant Seed",
             icon = "sprout",
-            available = needsSeed and drugCfg.planting ~= nil,
-            reason = needsSoil and reason("Needs soil first")
-                or (not needsSeed) and reason("Already planted")
-                or nil,
+            available = plantingOk,
+            reason = plantingReason,
         },
         {
             id = "watering",
             label = "Water Plant",
             icon = "droplet",
-            available = (growing or (atHarvest and not waterFull)) and not waterFull and (growing or atHarvest) and drugCfg.watering ~= nil,
-            reason = (not (growing or atHarvest)) and reason("No plant yet")
-                or waterFull and reason("Reservoir full")
-                or nil,
+            available = wateringOk,
+            reason = wateringReason,
         },
         {
             id = "cutting",
             label = "Harvest",
             icon = "scissors",
-            available = hasBuds and drugCfg.cutting ~= nil,
-            reason = (not atHarvest) and reason("Not ready to harvest")
-                or (atHarvest and not hasBuds) and reason("All buds cut")
-                or nil,
+            available = cuttingOk,
+            reason = cuttingReason,
         },
         {
             id = "inspect",
@@ -234,15 +286,15 @@ local function ComputeActions(plot, drugCfg)
             id = "move",
             label = "Move",
             icon = "move",
-            available = inHouse,
-            reason = (not inHouse) and reason("Use /drugs to move admin plots") or nil,
+            available = true,
+            reason = nil,
         },
         {
             id = "remove",
             label = "Remove",
             icon = "trash",
-            available = inHouse,
-            reason = (not inHouse) and reason("Use /drugs to remove admin plots") or nil,
+            available = true,
+            reason = nil,
         },
     }
 end
@@ -277,6 +329,32 @@ local function PushSnapshot()
             actions       = ComputeActions(plot, drugCfg),
         },
     })
+end
+
+--- Async refresh of Scene.itemCounts for every action that has an item
+--- gate. Fire-and-forget — the next PushSnapshot picks up the new
+--- counts. Server is the authority; this is purely UX.
+local function RefreshItemCounts()
+    if not Scene then return end
+    local drugCfg = Scene.drugCfg
+    local needed, seen = {}, {}
+    for _, action in ipairs({ "soiling", "planting", "watering", "cutting" }) do
+        local need = RequiredItem(action, drugCfg)
+        if need and not seen[need.name] then
+            seen[need.name] = true
+            needed[#needed + 1] = need.name
+        end
+    end
+    if #needed == 0 then
+        Scene.itemCounts = {}
+        return
+    end
+    CreateThread(function()
+        local counts = lib.callback.await("pickle_drugs:getItemCounts", false, needed)
+        if not Scene then return end
+        Scene.itemCounts = counts or {}
+        PushSnapshot()
+    end)
 end
 
 -- ─── Threads ───────────────────────────────────────────────────────────────
@@ -336,15 +414,20 @@ local function ReturnToMenu()
     if not Scene then return end
     Scene.activeAction = "menu"
     Scene.activeCancel = nil
+    -- A sub-scene just closed — the server may have consumed soil /
+    -- seed / harvest scissors etc. Re-pull counts so the menu reflects
+    -- the new state without a manual refresh.
+    RefreshItemCounts()
     PushSnapshot()
     StartTween(MenuPreset(Scene.spot), TWEEN_MS, function()
         PushSnapshot()
     end)
 end
 
--- Forward-declared so StartAction's "move" / "remove" branches can call
--- it; the body is defined below alongside the other open/close helpers.
-local ClosePlantScene
+-- Forward-declared as a global so other modules (housing's MovePlot) can
+-- invoke it. StartAction's "move" / "remove" branches use it too; their
+-- closures resolve it as an upvalue / global at call time.
+ClosePlantScene = nil
 
 local function StartAction(action)
     if not Scene or Scene.activeAction ~= "menu" then return end
@@ -387,11 +470,33 @@ local function StartAction(action)
     local plot = GetPlotState(Scene.plotId)
     if not plot then return end
     local actions = ComputeActions(plot, Scene.drugCfg)
-    local available = false
+    local available, denyReason = false, nil
     for _, a in ipairs(actions) do
-        if a.id == action and a.available then available = true break end
+        if a.id == action then
+            available = a.available
+            denyReason = a.reason
+            break
+        end
     end
-    if not available then return end
+    if not available then
+        -- Show why — most often "Need <item>". If state-only (e.g.
+        -- "Already soiled") we still surface it so the click isn't
+        -- silently swallowed.
+        if denyReason then
+            lib.notify({ title = "Plant", description = denyReason, type = "error" })
+        end
+        return
+    end
+
+    -- Re-check the item gate against the latest cached counts: a slow
+    -- callback might have left ComputeActions optimistic. The server is
+    -- still authoritative, but we can save a wasted scene tween.
+    local hasItem, need = PlayerHasItemFor(action, Scene.drugCfg)
+    if not hasItem and need then
+        lib.notify({ title = "Plant", description = "Need " .. need.label, type = "error" })
+        RefreshItemCounts()
+        return
+    end
 
     -- Flip the active action immediately so the NUI taskbar highlights the
     -- chosen button on click. The actual scene props/input only spin up
@@ -472,6 +577,7 @@ function OpenPlantScene(plotId)
         data   = { plotId = plotId, drug = drugCfg.label or plot.drug },
     })
     PushSnapshot()
+    RefreshItemCounts()
     DoScreenFadeIn(400)
 
     StartCamThread()

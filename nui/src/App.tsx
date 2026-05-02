@@ -20,7 +20,10 @@ import { EmployeeInfoPanel } from "./EmployeeInfoPanel";
 import { HousingPanel, type Interior, type House } from "./HousingPanel";
 import { HouseManagePanel, type HouseManageData } from "./HouseManagePanel";
 import { HousePlacementHud, type PlacementHudData } from "./HousePlacementHud";
+import { StoragePanel, type StorageData } from "./StoragePanel";
 import { ZonePickerHud, type ZonePickerHudData } from "./ZonePickerHud";
+import { Phone } from "./phone/Phone";
+import { DealsHud, type DealsHudData } from "./DealsHud";
 
 // ─── Types ────────────────────────────────────────────────────────────────
 
@@ -554,7 +557,6 @@ function App() {
     // Employees roster surface
     const [employeesOpen, setEmployeesOpen] = useState(false);
     const [employeesHidden, setEmployeesHidden] = useState(false);
-    const [employeesModels, setEmployeesModels] = useState<string[]>([]);
     const [employeesList, setEmployeesList] = useState<EmployeeRow[]>([]);
 
     // Plot assigner surface
@@ -584,8 +586,22 @@ function App() {
     // Placement HUD
     const [placementHud, setPlacementHud] = useState<PlacementHudData | null>(null);
 
+    // Storage locker panel
+    const [storageData, setStorageData] = useState<StorageData | null>(null);
+
     // Zone picker HUD (admin in-world zone bounds picker)
     const [zonePickerHud, setZonePickerHud] = useState<ZonePickerHudData | null>(null);
+
+    const [phoneOpen, setPhoneOpen] = useState(false);
+    // Unread messages count — lifted to App so it survives Phone
+    // mount/unmount. Otherwise the badge reset to 0 every time the
+    // phone closed (no events would fire to repopulate it before
+    // the user re-opened it).
+    const [messagesUnread, setMessagesUnread] = useState(0);
+
+    // DealsHud is a true world HUD — visible whenever the player has any
+    // active/scheduled deals, regardless of which (if any) panel is open.
+    const [dealsHud, setDealsHud] = useState<DealsHudData>([]);
 
     const [pitcherLevel, setPitcherLevel] = useState(1.0);
     const [plantWaterLevel, setPlantWaterLevel] = useState(0.0);
@@ -631,8 +647,7 @@ function App() {
     );
 
     // Employees roster
-    useNuiEvent<{ models?: string[]; employees?: EmployeeRow[] }>("openEmployees", (data) => {
-        setEmployeesModels(data?.models ?? []);
+    useNuiEvent<{ employees?: EmployeeRow[] }>("openEmployees", (data) => {
         setEmployeesList(data?.employees ?? []);
         setEmployeesHidden(false);
         setEmployeesOpen(true);
@@ -706,6 +721,20 @@ function App() {
     // Placement HUD
     useNuiEvent<PlacementHudData>("openPlacementHud", (data) => setPlacementHud(data ?? null));
     useNuiEvent<void>("closePlacementHud", () => setPlacementHud(null));
+
+    // Storage locker panel
+    useNuiEvent<StorageData>("openStoragePanel", (data) => setStorageData(data ?? null));
+    useNuiEvent<void>("closeStoragePanel", () => setStorageData(null));
+
+    // Phone (in-game device — currently just hosts the Help app)
+    useNuiEvent<void>("openPhone", () => setPhoneOpen(true));
+    useNuiEvent<void>("closePhone", () => setPhoneOpen(false));
+    useNuiEvent<number>("messagesUnread", (n) => {
+        if (typeof n === "number") setMessagesUnread(n);
+    });
+
+    // Active/scheduled deals push (from dealing/client.lua).
+    useNuiEvent<DealsHudData>("dealsHudUpdate", (d) => setDealsHud(d ?? []));
 
     // Zone picker HUD
     useNuiEvent<ZonePickerHudData>("openZonePickerHud", (data) => setZonePickerHud(data ?? null));
@@ -827,10 +856,34 @@ function App() {
         empInfoOpen ||
         housingOpen ||
         houseManageOpen ||
+        phoneOpen ||
+        !!storageData ||
         !!placementHud ||
         !!zonePickerHud ||
         !!gizmoHelp;
-    if (!anyOpen) return null;
+
+    // The DealsHud is a true HUD: present whenever the player has any
+    // active or scheduled deals, regardless of which (if any) panel is
+    // up. Rendered as a sibling to whatever else the App returns.
+    const hudOverlay = dealsHud.length > 0 ? <DealsHud data={dealsHud} /> : null;
+
+    if (!anyOpen) return hudOverlay;
+
+    // Compute which panel surface to show via the existing cascade. Wrap
+    // it in an IIFE so the DealsHud can sit as a sibling without edits
+    // to every individual `return` branch.
+    const panelEl: React.ReactNode = (() => {
+    if (phoneOpen && !open) {
+        return (
+            <Phone
+                messagesUnread={messagesUnread}
+                onClose={() => {
+                    setPhoneOpen(false);
+                    fetchNui("phoneClose");
+                }}
+            />
+        );
+    }
 
     if (housingOpen && !open) {
         return (
@@ -852,6 +905,15 @@ function App() {
             <HouseManagePanel
                 data={houseManageData}
                 onClose={() => fetchNui("houseManageClose")}
+            />
+        );
+    }
+
+    if (storageData && !open) {
+        return (
+            <StoragePanel
+                data={storageData}
+                onClose={() => fetchNui("storageClose")}
             />
         );
     }
@@ -882,7 +944,6 @@ function App() {
         return (
             <>
                 <EmployeesPanel
-                    models={employeesModels}
                     employees={employeesList}
                     hidden={employeesHidden}
                     onClose={() => fetchNui("employeesClose")}
@@ -969,6 +1030,9 @@ function App() {
             )}
         </div>
     );
+    })();
+
+    return <>{panelEl}{hudOverlay}</>;
 }
 
 export default App;

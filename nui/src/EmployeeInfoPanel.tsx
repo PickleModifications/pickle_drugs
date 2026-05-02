@@ -84,7 +84,57 @@ export function EmployeeInfoPanel({
                             </div>
                         </div>
                     )}
+
+                    <CarryBag employee={employee} />
                 </div>
+            </div>
+        </div>
+    );
+}
+
+function CarryBag({ employee }: { employee: EmployeeRow }) {
+    const carry = employee.carry || {};
+    const total = employee.carryTotal ?? 0;
+    const cap = employee.carryCap ?? 0;
+    const buckets = Object.entries(carry);
+    if (buckets.length === 0 && total === 0) return null;
+
+    return (
+        <div>
+            <div className="flex items-center justify-between mb-1.5">
+                <div className="text-[11px] uppercase tracking-wider text-white/45">
+                    Carry bag
+                </div>
+                <div className="text-[10px] tabular-nums text-white/50">
+                    {total}{cap > 0 ? ` / ${cap}` : ""}
+                </div>
+            </div>
+            <div className="space-y-1.5">
+                {buckets.map(([lockerId, items]) => {
+                    const entries = Object.entries(items || {});
+                    if (entries.length === 0) return null;
+                    const dest = lockerId === "_unrouted" ? "Unrouted" : lockerId;
+                    return (
+                        <div
+                            key={lockerId}
+                            className="rounded-md bg-white/[0.04] ring-1 ring-white/10 px-2.5 py-1.5"
+                        >
+                            <div className="text-[10px] uppercase tracking-wider text-white/45 mb-0.5">
+                                → {dest}
+                            </div>
+                            <div className="flex flex-wrap gap-1">
+                                {entries.map(([name, count]) => (
+                                    <span
+                                        key={name}
+                                        className="text-[11px] tabular-nums rounded bg-white/[0.06] ring-1 ring-white/15 px-2 py-0.5 text-white/80"
+                                    >
+                                        {name.replace(/_/g, " ")} ×{count}
+                                    </span>
+                                ))}
+                            </div>
+                        </div>
+                    );
+                })}
             </div>
         </div>
     );
