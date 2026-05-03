@@ -545,7 +545,7 @@ local function tryOfferToPlayer(src, cid)
             return false, ("zone '%s' has no usable deal point"):format(zone.label or zone.id)
         end
         local autoId = "auto_" .. genId("dl")
-        local slot = Dealers.GetSlot(dealerSlotId)
+        local slot = Dealers.GetPlayerSlot and Dealers.GetPlayerSlot(cid, dealerSlotId) or nil
         -- Spawn the customer ped on the deal point (broadcast).
         TriggerClientEvent("pickle_drugs:dealingCustomerSpawn", -1, {
             deal_id   = autoId,

@@ -16,8 +16,6 @@ const TILES = {
     atlas: `${TILE_BASE}/styleAtlas/{z}/{x}/{y}.jpg`,
     satellite: `${TILE_BASE}/styleSatelite/{z}/{x}/{y}.jpg`,
 };
-const MAP_W = 320;
-const MAP_H = 290;
 const DEFAULT_COLOR = "#38bdf8";
 // ─── Helpers ──────────────────────────────────────────────────────────────
 function makeCRS() {
@@ -123,7 +121,13 @@ export function WorldMap({ zones, selectedZoneId, draftShape, draftDealPoints, m
         });
         map.on("mouseout", () => setCursor(null));
         mapRef.current = map;
+        // Container can resize when the surrounding flex layout settles
+        // or the user resizes the window — Leaflet caches its size at
+        // init and won't repaint correctly until told to recompute.
+        const ro = new ResizeObserver(() => map.invalidateSize());
+        ro.observe(el);
         return () => {
+            ro.disconnect();
             map.remove();
             mapRef.current = null;
             overlayRef.current = null;
@@ -276,7 +280,7 @@ export function WorldMap({ zones, selectedZoneId, draftShape, draftDealPoints, m
             });
         }
     }, [zones, selectedZoneId, draftShape, draftDealPoints, mode, onSelectZone]);
-    return (_jsxs("div", { className: "relative rounded-md overflow-hidden ring-1 ring-white/10 bg-[#0b1220]", style: { width: MAP_W, height: MAP_H }, children: [_jsx("div", { ref: containerRef, className: "w-full h-full" }), draftShape && (_jsx("div", { className: "absolute top-1 left-1 z-[400] text-[10px] px-2 py-1 rounded ring-1 " +
+    return (_jsxs("div", { className: "relative rounded-md overflow-hidden ring-1 ring-white/10 bg-[#0b1220] flex-1 min-h-0 w-full", children: [_jsx("div", { ref: containerRef, className: "absolute inset-0" }), draftShape && (_jsx("div", { className: "absolute top-1 left-1 z-[400] text-[10px] px-2 py-1 rounded ring-1 " +
                     (mode === "deal"
                         ? "bg-amber-500/30 ring-amber-400/50 text-amber-50"
                         : "bg-sky-500/25 ring-sky-400/50 text-sky-50"), children: mode === "deal" ? "Placing deal points" : "Editing polygon" })), _jsx("div", { className: "absolute bottom-1 left-1 text-[9px] text-white/70 pointer-events-none bg-black/60 rounded px-1.5 py-0.5 tabular-nums", children: cursor

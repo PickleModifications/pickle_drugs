@@ -7,8 +7,8 @@
 --     to whoever's around the customer).
 --   * NUI bridges for dealer CRUD + hire/dismiss/summon/give-stock.
 
-local SlotsPublic = {}      -- id → public slot row (for the admin tab)
-local OwnerSlots  = {}      -- id → owned slot (with inventory)
+local AdminSlots = {}       -- id → { id, zone_id, cut_pct } (admin tab)
+local MySlots    = {}       -- id → personalised slot view (the only player-facing list)
 
 -- Local-only summoned peds (one per slot at most). Two-phase like the
 -- customer ped lifecycle: a Pending entry holds the meet point + blip
@@ -331,29 +331,40 @@ end)
 
 -- ─── Owner / public roster sync ───────────────────────────────────────────
 
+-- Personalised slot view for the local player (one per admin slot).
+-- Contains the player's randomised name + model and their hire/inventory
+-- state. This is the only payload the phone consumes.
 RegisterNetEvent("pickle_drugs:dealerSlotUpdate", function(s)
     if not s or not s.id then return end
-    SlotsPublic[s.id] = s
+    MySlots[s.id] = s
     SendNUIMessage({ action = "dealerSlotUpdate", data = s })
 end)
 
 RegisterNetEvent("pickle_drugs:dealerSlotRemoved", function(id)
     if not id then return end
-    SlotsPublic[id] = nil
-    OwnerSlots[id] = nil
+    MySlots[id] = nil
     SendNUIMessage({ action = "dealerSlotRemoved", data = id })
     Dealers_DespawnSummoned(id)
 end)
 
-RegisterNetEvent("pickle_drugs:dealerOwnerUpdate", function(s)
+-- Admin-tab payload — bare slot (id, zone_id, cut_pct), no player identity.
+RegisterNetEvent("pickle_drugs:dealerAdminSlotUpdate", function(s)
     if not s or not s.id then return end
-    OwnerSlots[s.id] = s
-    SendNUIMessage({ action = "dealerOwnerUpdate", data = s })
+    AdminSlots[s.id] = s
+    SendNUIMessage({ action = "dealerAdminSlotUpdate", data = s })
+end)
+
+RegisterNetEvent("pickle_drugs:dealerAdminSlotRemoved", function(id)
+    if not id then return end
+    AdminSlots[id] = nil
+    SendNUIMessage({ action = "dealerAdminSlotRemoved", data = id })
 end)
 
 RegisterNetEvent("pickle_drugs:dealerOwnerRemoved", function(id)
     if not id then return end
-    OwnerSlots[id] = nil
+    -- Local player just dismissed — server will follow up with a fresh
+    -- dealerSlotUpdate carrying hired=false, but tear down the meet ped
+    -- right away so the cancel feels instant.
     SendNUIMessage({ action = "dealerOwnerRemoved", data = id })
     Dealers_DespawnSummoned(id)
 end)
@@ -481,15 +492,15 @@ end)
 
 -- ─── NUI callbacks ────────────────────────────────────────────────────────
 
-RegisterNUICallback("dealerListPublic", function(_, cb)
-    local out = {}
-    for _, s in pairs(SlotsPublic) do out[#out + 1] = s end
-    cb(out)
+RegisterNUICallback("dealerListAdmin", function(_, cb)
+    local list = lib.callback.await("pickle_drugs:listDealersAdmin", false) or {}
+    for _, s in ipairs(list) do AdminSlots[s.id] = s end
+    cb(list)
 end)
 
 RegisterNUICallback("dealerListMine", function(_, cb)
     local list = lib.callback.await("pickle_drugs:listMyDealers", false) or {}
-    for _, s in ipairs(list) do OwnerSlots[s.id] = s end
+    for _, s in ipairs(list) do MySlots[s.id] = s end
     cb(list)
 end)
 
@@ -538,12 +549,12 @@ end)
 
 CreateThread(function()
     Wait(2500)
-    -- Public roster + owner slots so admin/manage UI snapshots are correct
-    -- on first open without waiting for a server broadcast.
-    local pub = lib.callback.await("pickle_drugs:listDealers", false) or {}
-    for _, s in ipairs(pub) do SlotsPublic[s.id] = s end
+    -- Admin slot list + personalised slot list so admin/manage UI snapshots
+    -- are correct on first open without waiting for a server broadcast.
+    local adm = lib.callback.await("pickle_drugs:listDealersAdmin", false) or {}
+    for _, s in ipairs(adm) do AdminSlots[s.id] = s end
     local mine = lib.callback.await("pickle_drugs:listMyDealers", false) or {}
-    for _, s in ipairs(mine) do OwnerSlots[s.id] = s end
+    for _, s in ipairs(mine) do MySlots[s.id] = s end
 end)
 
 AddEventHandler("onResourceStop", function(rn)

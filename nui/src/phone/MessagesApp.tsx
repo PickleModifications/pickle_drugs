@@ -37,15 +37,15 @@ type MessagesPayload = {
     customers: Record<string, Customer>;
 };
 
-// Public dealer slot. `hired` means *some* player has hired it (not
-// necessarily us). `inventory` is only populated when the local player
-// owns the slot — the server scopes that field to the owner.
+// Personalised dealer slot — every player has their own randomised
+// name + model per admin slot, and the `hired` flag is per-player too.
+// Sharing across players is gone, so there's only one list now.
 type DealerSlot = {
     id: string;
     first_name: string;
     last_name: string;
     model: string;
-    zones: string[];
+    zone_id: string;
     hired?: boolean;
     inventory?: Record<string, number>;
     cut_pct?: number;
@@ -59,11 +59,10 @@ export function MessagesApp({ onBack }: { onBack: () => void }) {
     const [snapshot, setSnapshot] = useState<MessagesPayload>({
         deals: [], zones: {}, customers: {},
     });
-    // Two stores so we can tell "my owned slot" apart from "public slot
-    // someone else hired" — the latter is hidden from the inbox so the
-    // list only shows actionable threads.
-    const [publicDealers, setPublicDealers] = useState<Record<string, DealerSlot>>({});
-    const [ownedDealers, setOwnedDealers]   = useState<Record<string, DealerSlot>>({});
+    // Personalised view of every admin slot. Each entry has the player's
+    // own name/model and a `hired` flag controlling which conversation
+    // panel renders.
+    const [myDealers, setMyDealers] = useState<Record<string, DealerSlot>>({});
     // slotId → true when a meetup is currently scheduled. Pushed live by
     // the dealers client whenever a summoned ped is created/destroyed.
     const [summoned, setSummoned] = useState<Record<string, boolean>>({});
@@ -79,10 +78,8 @@ export function MessagesApp({ onBack }: { onBack: () => void }) {
             setSnapshot(data);
         })();
         (async () => {
-            const pub = (await fetchNui("dealerListPublic", {})) as DealerSlot[] | undefined;
-            if (pub && !cancelled) setPublicDealers(Object.fromEntries(pub.map((s) => [s.id, s])));
             const mine = (await fetchNui("dealerListMine", {})) as DealerSlot[] | undefined;
-            if (mine && !cancelled) setOwnedDealers(Object.fromEntries(mine.map((s) => [s.id, s])));
+            if (mine && !cancelled) setMyDealers(Object.fromEntries(mine.map((s) => [s.id, s])));
             const states = (await fetchNui("dealerSummonStates", {})) as string[] | undefined;
             if (states && !cancelled) {
                 setSummoned(Object.fromEntries(states.map((id) => [id, true])));
@@ -94,21 +91,16 @@ export function MessagesApp({ onBack }: { onBack: () => void }) {
     useNuiEvent<MessagesPayload>("dealingMessages", (d) => { if (d) setSnapshot(d); });
     useNuiEvent<DealerSlot>("dealerSlotUpdate", (s) => {
         if (!s?.id) return;
-        setPublicDealers((p) => ({ ...p, [s.id]: s }));
+        setMyDealers((p) => ({ ...p, [s.id]: s }));
     });
     useNuiEvent<string>("dealerSlotRemoved", (id) => {
         if (!id) return;
-        setPublicDealers((p) => { const n = { ...p }; delete n[id]; return n; });
-        setOwnedDealers((p) => { const n = { ...p }; delete n[id]; return n; });
+        setMyDealers((p) => { const n = { ...p }; delete n[id]; return n; });
         setOpenThread((t) => (t && t.kind === "dealer" && t.id === id ? null : t));
     });
-    useNuiEvent<DealerSlot>("dealerOwnerUpdate", (s) => {
-        if (!s?.id) return;
-        setOwnedDealers((p) => ({ ...p, [s.id]: s }));
-    });
-    useNuiEvent<string>("dealerOwnerRemoved", (id) => {
-        if (!id) return;
-        setOwnedDealers((p) => { const n = { ...p }; delete n[id]; return n; });
+    useNuiEvent<string>("dealerOwnerRemoved", () => {
+        // Server has flipped our hired flag off; the dealerSlotUpdate
+        // ack will land alongside this. No extra state to clear.
     });
     useNuiEvent<{ id: string; summoned: boolean }>("dealerSummonState", (d) => {
         if (!d?.id) return;
@@ -123,35 +115,28 @@ export function MessagesApp({ onBack }: { onBack: () => void }) {
         [snapshot.deals],
     );
 
-    // Visible threads = (a) every dealer I own, (b) every unhired dealer.
-    // Dealers hired by other players are hidden — the inbox is for
-    // actionable threads only.
+    // Personalised list — every admin slot has a row here. Sort hired
+    // first so the player's existing dealers cluster at the top.
     const dealerList = useMemo(() => {
-        const out: DealerSlot[] = [];
-        const seen: Record<string, true> = {};
-        for (const s of Object.values(ownedDealers)) {
-            out.push(s);
-            seen[s.id] = true;
-        }
-        for (const s of Object.values(publicDealers)) {
-            if (seen[s.id]) continue;
-            if (!s.hired) out.push(s);
-        }
-        out.sort((a, b) => `${a.first_name} ${a.last_name}`.localeCompare(`${b.first_name} ${b.last_name}`));
+        const out = Object.values(myDealers).slice();
+        out.sort((a, b) => {
+            if (!!a.hired !== !!b.hired) return a.hired ? -1 : 1;
+            return `${a.first_name} ${a.last_name}`.localeCompare(`${b.first_name} ${b.last_name}`);
+        });
         return out;
-    }, [publicDealers, ownedDealers]);
+    }, [myDealers]);
 
     const openDeal = openThread?.kind === "deal" ? deals.find((d) => d.id === openThread.id) : null;
     const openDealerSlot: DealerSlot | null = openThread?.kind === "dealer"
-        ? (ownedDealers[openThread.id] ?? publicDealers[openThread.id] ?? null)
+        ? (myDealers[openThread.id] ?? null)
         : null;
-    const openDealerIsMine = openDealerSlot ? !!ownedDealers[openDealerSlot.id] : false;
+    const openDealerIsMine = !!openDealerSlot?.hired;
 
-    // Resolve a dealer's zone-id list into the labels stored in
-    // snapshot.zones. Unknown ids fall back to a short "?<id>" tag so a
-    // mid-edit zone delete is still visible (vs silently dropped).
-    const zoneLabelsFor = (ids: string[]): string[] =>
-        ids.map((id) => snapshot.zones[id]?.label ?? `?${id.slice(0, 6)}`);
+    // Resolve a dealer's single zone id into its label. Unknown ids fall
+    // back to a short "?<id>" tag so a mid-edit zone delete is still
+    // visible (vs silently dropped).
+    const zoneLabelFor = (id: string): string =>
+        snapshot.zones[id]?.label ?? `?${id.slice(0, 6)}`;
 
     const customerName = (cid: string) => {
         const c = snapshot.customers[cid];
@@ -186,8 +171,8 @@ export function MessagesApp({ onBack }: { onBack: () => void }) {
                 />
             ) : openDealerSlot ? (
                 openDealerIsMine
-                    ? <DealerConversation dealer={openDealerSlot} zoneLabels={zoneLabelsFor(openDealerSlot.zones)} summoned={!!summoned[openDealerSlot.id]} />
-                    : <HireDealerPrompt dealer={openDealerSlot} zoneLabels={zoneLabelsFor(openDealerSlot.zones)} />
+                    ? <DealerConversation dealer={openDealerSlot} zoneLabel={zoneLabelFor(openDealerSlot.zone_id)} summoned={!!summoned[openDealerSlot.id]} />
+                    : <HireDealerPrompt dealer={openDealerSlot} zoneLabel={zoneLabelFor(openDealerSlot.zone_id)} />
             ) : (
                 <div className="phone-scroll flex-1 overflow-y-auto">
                     {dealerList.length > 0 && (
@@ -196,7 +181,7 @@ export function MessagesApp({ onBack }: { onBack: () => void }) {
                         </div>
                     )}
                     {dealerList.map((d) => {
-                        const mine = !!ownedDealers[d.id];
+                        const mine = !!d.hired;
                         const stock = mine
                             ? Object.values(d.inventory ?? {}).reduce((a, n) => a + (Number(n) || 0), 0)
                             : 0;
@@ -234,9 +219,7 @@ export function MessagesApp({ onBack }: { onBack: () => void }) {
                                             ? (stock > 0
                                                 ? `Carrying ${stock} item${stock === 1 ? "" : "s"}.`
                                                 : "Standing by — give me product to start dealing.")
-                                            : (d.zones.length > 0
-                                                ? `Looking for work · ${zoneLabelsFor(d.zones).join(", ")}`
-                                                : "Looking for work · no zones assigned")}
+                                            : `Looking for work · ${zoneLabelFor(d.zone_id)}`}
                                     </div>
                                 </div>
                             </button>
@@ -287,14 +270,12 @@ export function MessagesApp({ onBack }: { onBack: () => void }) {
     );
 }
 
-function HireDealerPrompt({ dealer, zoneLabels }: { dealer: DealerSlot; zoneLabels: string[] }) {
+function HireDealerPrompt({ dealer, zoneLabel }: { dealer: DealerSlot; zoneLabel: string }) {
     const cut = Math.round((dealer.cut_pct ?? 0.10) * 100);
     return (
         <div className="phone-scroll flex-1 overflow-y-auto px-3 py-3 flex flex-col gap-2">
             <Bubble side="them" name={`${dealer.first_name} ${dealer.last_name}`}>
-                Heard you need a hand. I work {zoneLabels.length > 0
-                    ? <>around <b>{zoneLabels.join(", ")}</b></>
-                    : "wherever you point me"}. I'll close any deal that comes through while you stay clean.
+                Heard you need a hand. I work around <b>{zoneLabel}</b>. I'll close any deal that comes through while you stay clean.
             </Bubble>
             <Bubble side="them" name={`${dealer.first_name}`}>
                 I take a <b>{cut}%</b> cut. The rest is yours.
@@ -311,16 +292,14 @@ function HireDealerPrompt({ dealer, zoneLabels }: { dealer: DealerSlot; zoneLabe
     );
 }
 
-function DealerConversation({ dealer, zoneLabels, summoned }: { dealer: DealerSlot; zoneLabels: string[]; summoned: boolean }) {
+function DealerConversation({ dealer, zoneLabel, summoned }: { dealer: DealerSlot; zoneLabel: string; summoned: boolean }) {
     const stock = Object.entries(dealer.inventory ?? {}).filter(([, n]) => (Number(n) || 0) > 0);
     const total = stock.reduce((a, [, n]) => a + (Number(n) || 0), 0);
 
     return (
         <div className="phone-scroll flex-1 overflow-y-auto px-3 py-3 flex flex-col gap-2">
             <Bubble side="them" name={`${dealer.first_name} ${dealer.last_name}`}>
-                On call. I'll handle anyone who hits up {zoneLabels.length > 0
-                    ? <b>{zoneLabels.join(", ")}</b>
-                    : "the zones you assign me"} for you.
+                On call. I'll handle anyone who hits up <b>{zoneLabel}</b> for you.
             </Bubble>
             {total > 0 ? (
                 <Bubble side="them" name={`${dealer.first_name}`}>

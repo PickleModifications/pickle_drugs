@@ -18,8 +18,6 @@ const TILES = {
     satellite: `${TILE_BASE}/styleSatelite/{z}/{x}/{y}.jpg`,
 };
 
-const MAP_W = 320;
-const MAP_H = 290;
 const DEFAULT_COLOR = "#38bdf8";
 
 // ─── Types ────────────────────────────────────────────────────────────────
@@ -195,7 +193,14 @@ export function WorldMap({
 
         mapRef.current = map;
 
+        // Container can resize when the surrounding flex layout settles
+        // or the user resizes the window — Leaflet caches its size at
+        // init and won't repaint correctly until told to recompute.
+        const ro = new ResizeObserver(() => map.invalidateSize());
+        ro.observe(el);
+
         return () => {
+            ro.disconnect();
             map.remove();
             mapRef.current = null;
             overlayRef.current = null;
@@ -369,10 +374,9 @@ export function WorldMap({
 
     return (
         <div
-            className="relative rounded-md overflow-hidden ring-1 ring-white/10 bg-[#0b1220]"
-            style={{ width: MAP_W, height: MAP_H }}
+            className="relative rounded-md overflow-hidden ring-1 ring-white/10 bg-[#0b1220] flex-1 min-h-0 w-full"
         >
-            <div ref={containerRef} className="w-full h-full" />
+            <div ref={containerRef} className="absolute inset-0" />
 
             {/* Mode pill — purely informative. The mode itself is
                 controlled by the parent (ZoneEditor's "+ Add deal
