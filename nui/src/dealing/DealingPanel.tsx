@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Plus, Trash2, Save, Pencil, MapPin, Edit3 } from "lucide-react";
+import { Plus, Trash2, Save, Pencil, MapPin, Edit3, Briefcase } from "lucide-react";
 
 import { fetchNui, useNuiEvent } from "@/lib/nui";
 import { WorldMap } from "./WorldMap";
@@ -32,6 +32,19 @@ export type DealingCustomer = {
     idle_scenario: string;
 };
 
+// Admin-defined dealer slot. Players hire one of these from the manage
+// panel. Same zone-membership shape as customers — a dealer covers a
+// set of zones and auto-handles offers in any of them.
+export type DealerSlot = {
+    id: string;
+    first_name: string;
+    last_name: string;
+    model: string;
+    zones: string[];
+    hired: boolean;
+    cut_pct?: number;
+};
+
 const DEFAULT_ZONE_COLOR = "#38bdf8";
 
 const NEW_ZONE = (): DealingZone => ({
@@ -53,6 +66,16 @@ const NEW_CUSTOMER = (): DealingCustomer => ({
     model: "a_m_m_business_01",
     zones: [],
     idle_scenario: "WORLD_HUMAN_SMOKING",
+});
+
+const NEW_DEALER = (): DealerSlot => ({
+    id: "",
+    first_name: "Dealer",
+    last_name: "",
+    model: "g_m_y_lost_01",
+    zones: [],
+    hired: false,
+    cut_pct: 0.10,
 });
 
 const SCENARIOS = [
@@ -87,6 +110,9 @@ export function DealingPanel() {
     const [draftZone, setDraftZone] = useState<DealingZone | null>(null);
     const [editingCustomerId, setEditingCustomerId] = useState<string | null>(null);
     const [draftCustomer, setDraftCustomer] = useState<DealingCustomer | null>(null);
+    const [dealers, setDealers] = useState<DealerSlot[]>([]);
+    const [editingDealerId, setEditingDealerId] = useState<string | null>(null);
+    const [draftDealer, setDraftDealer] = useState<DealerSlot | null>(null);
     // Map click-mode: "edit" routes clicks into polygon vertex
     // authoring; "deal" routes them into deal-point placement
     // (rejected unless inside the polygon).
@@ -159,6 +185,35 @@ export function DealingPanel() {
     useNuiEvent<string>("dealingCustomerRemoved", (id) => {
         setCustomers((prev) => prev.filter((x) => x.id !== id));
         setEditingCustomerId((s) => (s === id ? null : s));
+    });
+
+    // Dealer roster (admin view).
+    useEffect(() => {
+        (async () => {
+            const list = (await fetchNui("dealerListPublic", {})) as DealerSlot[] | undefined;
+            if (list) setDealers(list);
+        })();
+    }, []);
+    useNuiEvent<DealerSlot>("dealerSlotUpdate", (s) => {
+        if (!s?.id) return;
+        setDealers((prev) => {
+            const i = prev.findIndex((x) => x.id === s.id);
+            if (i < 0) return [...prev, s];
+            const next = prev.slice();
+            next[i] = s;
+            return next;
+        });
+    });
+    useNuiEvent<string>("dealerSlotRemoved", (id) => {
+        setDealers((prev) => prev.filter((x) => x.id !== id));
+        setEditingDealerId((s) => (s === id ? null : s));
+    });
+    useNuiEvent<{ tempId: string; savedId: string }>("dealerSlotSaved", (d) => {
+        if (!d) return;
+        if (editingDealerId === "__new__" || editingDealerId === d.tempId) {
+            setEditingDealerId(d.savedId);
+            setDraftDealer((x) => (x ? { ...x, id: d.savedId } : x));
+        }
     });
 
     // Per-source ack from the server after a save. For brand-new
@@ -273,8 +328,33 @@ export function DealingPanel() {
     };
     const deleteCustomer = (id: string) => fetchNui("dealingDeleteCustomer", { id });
 
+    const dealersInSelected = useMemo(() => {
+        if (!selectedZone) return dealers;
+        return dealers.filter((d) => d.zones.includes(selectedZone.id));
+    }, [dealers, selectedZone]);
+    const startEditingDealer = (d: DealerSlot) => {
+        setEditingDealerId(d.id);
+        setDraftDealer({ ...d });
+    };
+    const startNewDealer = () => {
+        setEditingDealerId("__new__");
+        setDraftDealer(NEW_DEALER());
+    };
+    const saveDraftDealer = () => {
+        if (!draftDealer) return;
+        fetchNui("dealerSave", draftDealer);
+        if (draftDealer.id) {
+            setEditingDealerId(null);
+            setDraftDealer(null);
+        }
+        // For brand-new dealers we keep the editor mounted; the
+        // dealerSlotSaved ack adopts the assigned id and lets the admin
+        // continue editing without losing context.
+    };
+    const deleteDealer = (id: string) => fetchNui("dealerDelete", { id });
+
     return (
-        <div className="h-full grid grid-cols-[220px_340px_1fr] gap-3 min-h-0 text-white">
+        <div className="h-full grid grid-cols-[220px_340px_1fr_1fr] gap-3 min-h-0 text-white">
             {/* ── Column 1: Zone list ──────────────────────────────────── */}
             <div className="min-h-0 flex flex-col gap-2">
                 <div className="flex items-center justify-between shrink-0">
@@ -474,6 +554,76 @@ export function DealingPanel() {
                     {customersInSelected.length === 0 && editingCustomerId !== "__new__" && (
                         <div className="text-[11px] italic text-white/40">
                             {selectedZone ? "No customers assigned to this zone." : "No customers yet."}
+                        </div>
+                    )}
+                </div>
+            </div>
+
+            {/* ── Column 4: Dealer slot list ────────────────────────────── */}
+            <div className="min-h-0 flex flex-col gap-2">
+                <div className="flex items-center justify-between shrink-0">
+                    <span className="text-xs text-white/85 font-medium inline-flex items-center gap-1.5">
+                        <Briefcase className="h-3.5 w-3.5 text-amber-300" />
+                        Dealers <span className="text-white/45">· {dealersInSelected.length}{dealersInSelected.length !== dealers.length ? ` of ${dealers.length}` : ""}</span>
+                    </span>
+                    <button
+                        onClick={startNewDealer}
+                        className="inline-flex items-center gap-1.5 px-2 py-1 rounded ring-1 ring-amber-400/50 bg-amber-500/15 text-amber-100 hover:bg-amber-500/30 text-[11px]"
+                    >
+                        <Plus className="h-3 w-3" /> New
+                    </button>
+                </div>
+                <div className="flex-1 overflow-y-auto pr-1 -mr-1 flex flex-col gap-1">
+                    {editingDealerId === "__new__" && draftDealer && (
+                        <DealerEditor
+                            zones={zones}
+                            dealer={draftDealer}
+                            onChange={(patch) => setDraftDealer((d) => ({ ...(d as DealerSlot), ...patch }))}
+                            onSave={saveDraftDealer}
+                            onCancel={() => { setDraftDealer(null); setEditingDealerId(null); }}
+                        />
+                    )}
+                    {dealersInSelected.map((d) => {
+                        const editing = editingDealerId === d.id && draftDealer;
+                        if (editing) {
+                            return (
+                                <DealerEditor
+                                    key={d.id}
+                                    zones={zones}
+                                    dealer={draftDealer!}
+                                    onChange={(patch) => setDraftDealer((x) => ({ ...(x as DealerSlot), ...patch }))}
+                                    onSave={saveDraftDealer}
+                                    onCancel={() => { setDraftDealer(null); setEditingDealerId(null); }}
+                                    onDelete={() => deleteDealer(d.id)}
+                                />
+                            );
+                        }
+                        return (
+                            <button
+                                key={d.id}
+                                onClick={() => startEditingDealer(d)}
+                                className="text-left rounded px-2 py-1.5 ring-1 ring-white/10 hover:bg-white/[0.04] flex items-center gap-2"
+                            >
+                                <div className="flex-1 min-w-0">
+                                    <div className="text-xs truncate">
+                                        {d.first_name} {d.last_name}
+                                        {d.hired && (
+                                            <span className="ml-1.5 text-[9px] uppercase tracking-wider px-1 py-px rounded bg-emerald-500/20 ring-1 ring-emerald-400/40 text-emerald-200">
+                                                hired
+                                            </span>
+                                        )}
+                                    </div>
+                                    <div className="text-[10px] text-white/45 truncate">
+                                        {d.model} · {d.zones.length} zone{d.zones.length === 1 ? "" : "s"} · cut {((d.cut_pct ?? 0.10) * 100).toFixed(0)}%
+                                    </div>
+                                </div>
+                                <Pencil className="h-3 w-3 text-white/40" />
+                            </button>
+                        );
+                    })}
+                    {dealersInSelected.length === 0 && editingDealerId !== "__new__" && (
+                        <div className="text-[11px] italic text-white/40">
+                            {selectedZone ? "No dealers assigned to this zone." : "No dealer slots yet."}
                         </div>
                     )}
                 </div>
@@ -731,6 +881,110 @@ function CustomerEditor({
                         className="inline-flex items-center gap-1 px-2 py-1 rounded ring-1 ring-emerald-400/50 bg-emerald-500/15 text-emerald-100 hover:bg-emerald-500/30 text-[11px]"
                     >
                         <Save className="h-3 w-3" /> Save
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+}
+
+function DealerEditor({
+    dealer, zones, onChange, onSave, onCancel, onDelete,
+}: {
+    dealer: DealerSlot;
+    zones: DealingZone[];
+    onChange: (patch: Partial<DealerSlot>) => void;
+    onSave: () => void;
+    onCancel: () => void;
+    onDelete?: () => void;
+}) {
+    const persisted = !!dealer.id;
+    return (
+        <div className="rounded ring-1 ring-amber-400/40 bg-amber-500/5 p-2 flex flex-col gap-1.5">
+            <div className="grid grid-cols-2 gap-1.5">
+                <input
+                    value={dealer.first_name}
+                    onChange={(e) => onChange({ first_name: e.target.value })}
+                    placeholder="First"
+                    className="bg-black/40 ring-1 ring-white/10 rounded px-1.5 py-1 text-xs"
+                />
+                <input
+                    value={dealer.last_name}
+                    onChange={(e) => onChange({ last_name: e.target.value })}
+                    placeholder="Last"
+                    className="bg-black/40 ring-1 ring-white/10 rounded px-1.5 py-1 text-xs"
+                />
+            </div>
+            <select
+                value={dealer.model}
+                onChange={(e) => onChange({ model: e.target.value })}
+                className="bg-black/40 ring-1 ring-white/10 rounded px-1.5 py-1 text-xs"
+            >
+                {MODELS.map((m) => <option key={m} value={m}>{m}</option>)}
+            </select>
+            <label className="flex items-center gap-1 bg-black/40 ring-1 ring-white/10 rounded px-1.5 py-1">
+                <span className="text-white/45 text-[10px]">Cut %</span>
+                <input
+                    type="number"
+                    min={0}
+                    max={100}
+                    value={Math.round(((dealer.cut_pct ?? 0.10) * 100))}
+                    onChange={(e) => onChange({ cut_pct: Math.max(0, Math.min(1, (parseInt(e.target.value) || 0) / 100)) })}
+                    className="bg-transparent w-full outline-none text-xs tabular-nums"
+                />
+            </label>
+            <div className="text-[10px] text-white/55 mt-1">Zones</div>
+            <div className="flex flex-wrap gap-1 max-h-20 overflow-y-auto">
+                {zones.length === 0 && (
+                    <span className="text-[10px] italic text-white/35">Create a zone first.</span>
+                )}
+                {zones.map((z) => {
+                    const on = dealer.zones.includes(z.id);
+                    return (
+                        <button
+                            key={z.id}
+                            onClick={() =>
+                                onChange({
+                                    zones: on
+                                        ? dealer.zones.filter((id) => id !== z.id)
+                                        : [...dealer.zones, z.id],
+                                })
+                            }
+                            className={
+                                "px-1.5 py-0.5 rounded text-[10px] ring-1 transition-colors " +
+                                (on
+                                    ? "bg-amber-500/25 ring-amber-400/60 text-amber-50"
+                                    : "ring-white/15 text-white/55 hover:bg-white/[0.06]")
+                            }
+                        >
+                            {z.label}
+                        </button>
+                    );
+                })}
+            </div>
+            {dealer.hired && (
+                <div className="text-[10px] text-emerald-300/80 italic">
+                    Currently hired by a player.
+                </div>
+            )}
+            <div className="flex items-center justify-between gap-1.5 pt-1 border-t border-white/5">
+                {onDelete ? (
+                    <button
+                        onClick={onDelete}
+                        className="inline-flex items-center gap-1 px-2 py-1 rounded ring-1 ring-red-400/40 text-red-200 hover:bg-red-500/15 text-[11px]"
+                    >
+                        <Trash2 className="h-3 w-3" /> Delete
+                    </button>
+                ) : <span />}
+                <div className="flex gap-1.5">
+                    <button onClick={onCancel} className="px-2 py-1 rounded ring-1 ring-white/15 text-white/60 hover:bg-white/[0.06] text-[11px]">
+                        Cancel
+                    </button>
+                    <button
+                        onClick={onSave}
+                        className="inline-flex items-center gap-1 px-2 py-1 rounded ring-1 ring-amber-400/50 bg-amber-500/15 text-amber-100 hover:bg-amber-500/30 text-[11px]"
+                    >
+                        <Save className="h-3 w-3" /> {persisted ? "Save" : "Create"}
                     </button>
                 </div>
             </div>

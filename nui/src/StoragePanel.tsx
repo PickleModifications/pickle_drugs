@@ -74,12 +74,39 @@ export function StoragePanel({
     const [drag, setDrag] = useState<DragState | null>(null);
     const dragRef = useRef<DragState | null>(null);
     dragRef.current = drag;
+    // Dealer storage requires a confirm step before close so the player
+    // can't accidentally end the meetup mid-handoff. ESC + the X button
+    // both route through `requestClose`; lockers close immediately,
+    // dealers raise the in-panel modal.
+    const isDealer = typeof snap.id === "string" && snap.id.startsWith("dealer:");
+    const [confirmingClose, setConfirmingClose] = useState(false);
 
     useEffect(() => { setSnap(data); }, [data]);
 
     useNuiEvent<StorageData>("storageContents", (d) => {
         if (d && d.id === data.id) setSnap(d);
     });
+
+    const requestClose = () => {
+        if (isDealer) setConfirmingClose(true);
+        else onClose();
+    };
+
+    // ESC routes through requestClose so the dealer confirm modal can
+    // intercept. Native keydown listener — IsDisabledControlJust* on the
+    // Lua side doesn't fire reliably while NUI owns focus.
+    useEffect(() => {
+        const onKey = (e: KeyboardEvent) => {
+            if (e.key === "Escape") {
+                e.preventDefault();
+                if (confirmingClose) setConfirmingClose(false);
+                else requestClose();
+            }
+        };
+        window.addEventListener("keydown", onKey);
+        return () => window.removeEventListener("keydown", onKey);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [onClose, isDealer, confirmingClose]);
 
     const slots = Math.max(1, snap.slots || 0);
     const storageSlots: (StorageItem | null)[] = [];
@@ -105,12 +132,14 @@ export function StoragePanel({
                     count,
                 });
             } else if (src.side === "storage" && target.slot && src.slot !== target.slot) {
-                // Within-locker rearrange always moves the whole stack —
-                // partial reorders make no inventory sense.
+                // Wheel-level lets the player split a partial out of the
+                // source stack into another slot (or merge onto an existing
+                // same-item pile).
                 fetchNui("storageTransfer", {
                     direction: "rearrange",
                     fromSlot: src.slot,
                     toSlot: target.slot,
+                    count,
                 });
             }
         } else if (target.side === "player") {
@@ -198,7 +227,7 @@ export function StoragePanel({
         <div className="fixed inset-0 flex items-center justify-center pointer-events-none">
             <div
                 onContextMenu={(e) => e.preventDefault()}
-                className="pointer-events-auto rounded-2xl bg-black/95 ring-1 ring-white/10 shadow-2xl w-[860px] max-w-[94vw] max-h-[84vh] flex flex-col overflow-hidden"
+                className="relative pointer-events-auto rounded-2xl bg-black/95 ring-1 ring-white/10 shadow-2xl w-[860px] max-w-[94vw] max-h-[84vh] flex flex-col overflow-hidden"
             >
                 <div className="grid grid-cols-[auto_1fr_auto] items-center gap-3 px-5 h-11 border-b border-white/5 bg-white/[0.02]">
                     <div className="flex items-center gap-2">
@@ -208,7 +237,7 @@ export function StoragePanel({
                     <span className="text-[11px] uppercase tracking-wider justify-self-center text-white/55">
                         {Object.keys(snap.items || {}).length} / {slots} slots
                     </span>
-                    <button onClick={onClose}
+                    <button onClick={requestClose}
                         className="h-7 w-7 inline-flex items-center justify-center rounded ring-1 ring-white/25 text-white/70 hover:text-red-200 hover:bg-red-500/15">
                         <X className="h-4 w-4" />
                     </button>
@@ -257,6 +286,36 @@ export function StoragePanel({
                         )}
                     </Grid>
                 </div>
+
+                {confirmingClose && (
+                    <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/70 backdrop-blur-sm">
+                        <div className="rounded-xl bg-zinc-950 ring-1 ring-amber-400/30 shadow-2xl w-[360px] p-4 flex flex-col gap-3">
+                            <div className="flex items-center gap-2">
+                                <span className="h-2 w-2 rounded-full bg-amber-400" />
+                                <span className="text-sm font-semibold text-amber-100">End the meetup?</span>
+                            </div>
+                            <p className="text-[12px] text-white/65 leading-snug">
+                                Closing this will wrap up the handoff with {snap.label}. They'll
+                                pocket whatever's been left and walk away. You can summon them
+                                again from your phone.
+                            </p>
+                            <div className="flex items-center justify-end gap-2 pt-1">
+                                <button
+                                    onClick={() => setConfirmingClose(false)}
+                                    className="px-3 py-1.5 rounded ring-1 ring-white/15 text-white/75 hover:bg-white/[0.06] text-xs"
+                                >
+                                    Stay
+                                </button>
+                                <button
+                                    onClick={() => { setConfirmingClose(false); onClose(); }}
+                                    className="px-3 py-1.5 rounded ring-1 ring-amber-400/50 bg-amber-500/20 text-amber-50 hover:bg-amber-500/35 text-xs font-semibold"
+                                >
+                                    End meetup
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                )}
             </div>
 
             {drag && (

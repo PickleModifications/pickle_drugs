@@ -157,6 +157,8 @@ end)
 
 -- ─── NUI panel ────────────────────────────────────────────────────────────
 
+local closePanel  -- forward declared; defined below Storage.OpenLocker
+
 function Storage.OpenLocker(id)
     if OpenLocker then return end
     local snap = lib.callback.await("pickle_drugs:openStorage", false, id)
@@ -172,9 +174,24 @@ function Storage.OpenLocker(id)
     CurrentSnapshot = snap
     SetNuiFocus(true, true)
     SendNUIMessage({ action = "openStoragePanel", data = snap })
+
+    -- The NUI panel listens for the Escape keydown directly and fires
+    -- `storageClose` — far more reliable than IsDisabledControlJustReleased
+    -- under NUI focus, which routes input to the browser instead of the
+    -- gameplay control system. We still bounce pause-menu activation in a
+    -- Lua thread so the GTA pause menu can't appear underneath the panel.
+    CreateThread(function()
+        while OpenLocker == id do
+            Wait(0)
+            if IsPauseMenuActive() then
+                SetFrontendActive(false)
+                ActivateFrontendMenu(`FE_MENU_VERSION_EMPTY_NO_BACKGROUND`, true, -1)
+            end
+        end
+    end)
 end
 
-local function closePanel()
+closePanel = function()
     if not OpenLocker then return end
     local id = OpenLocker
     OpenLocker = nil

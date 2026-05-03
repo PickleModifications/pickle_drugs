@@ -205,7 +205,7 @@ function Grow.PerformWater(plot, drugCfg, nowMs, fraction)
     if not plot or not drugCfg then return false, "no_plot" end
     local harvest = Grow.HarvestStage(drugCfg)
     if (plot.stage or 0) < 1 or plot.stage > harvest then return false, "wrong_stage" end
-    local default = (drugCfg.watering and drugCfg.watering.pourPerPlot) or 0.20
+    local default = (Config.PlantScene and Config.PlantScene.watering and Config.PlantScene.watering.pourPerPlot) or 0.20
     local f = tonumber(fraction) or default
     if f <= 0 then return false, "no_fraction" end
     if f > default then f = default end

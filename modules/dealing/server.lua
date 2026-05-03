@@ -400,17 +400,31 @@ end)
 
 -- ─── Offer scheduler ──────────────────────────────────────────────────────
 
---- Drugs the player currently holds, returning { drug, qty } for the first
---- one with stock. We pick a drug per-offer rather than offering combinations.
-local function pickSaleableDrug(src)
+--- Drugs that have *any* stock available for `cid` — either on the
+--- player's person or carried by one of their hired dealers. The two
+--- pools matter at routing time: a drug with only dealer stock can
+--- still be offered (the dealer auto-fulfils), but the qty must be
+--- capped by whichever pool ends up filling the order.
+local function pickSaleableDrug(src, cid)
     if not (Inventory and Inventory.GetItemCount) then return nil end
     local options = {}
     for drug, cfg in pairs(Config.Drugs or {}) do
-        local item = cfg.cutting and cfg.cutting.harvestItem
+        local item = cfg.harvestItem
         if item and cfg.deal and cfg.deal.basePrice then
-            local owned = Inventory.GetItemCount(src, item) or 0
-            if owned > 0 then
-                options[#options + 1] = { drug = drug, item = item, owned = owned, base = cfg.deal.basePrice }
+            local pOwned = Inventory.GetItemCount(src, item) or 0
+            local dOwned = (Dealers and Dealers.TotalStockForCid)
+                and Dealers.TotalStockForCid(cid, item) or 0
+            if (pOwned + dOwned) > 0 then
+                options[#options + 1] = {
+                    drug         = drug,
+                    item         = item,
+                    base         = cfg.deal.basePrice,
+                    playerOwned  = pOwned,
+                    dealerStock  = dOwned,
+                    -- Kept for the diagnostic log; route-specific caps
+                    -- apply at qty-pick time below.
+                    owned        = pOwned + dOwned,
+                }
             end
         end
     end
@@ -472,9 +486,9 @@ end
 --- so the gap between "I have stock + customers" and "no offer landed"
 --- is visible without speculation.
 local function tryOfferToPlayer(src, cid)
-    local sale = pickSaleableDrug(src)
+    local sale = pickSaleableDrug(src, cid)
     if not sale then
-        return false, "player holds no saleable drug item (need a drug whose Config.Drugs[*].cutting.harvestItem is in inventory and Config.Drugs[*].deal.basePrice is set)"
+        return false, "no saleable stock anywhere (player inventory or hired-dealer carry must hold a drug whose Config.Drugs[*].harvestItem is set + Config.Drugs[*].deal.basePrice is configured)"
     end
     local cust = pickCustomerForPlayer(cid)
     if not cust then
@@ -500,11 +514,67 @@ local function tryOfferToPlayer(src, cid)
         return false, ("customer '%s %s' has no usable zones"):format(cust.first_name, cust.last_name)
     end
 
-    local maxQty = math.min(Config.Dealing.maxQty or 10, sale.owned)
+    -- Pick the route BEFORE the qty so it can be capped by whichever
+    -- pool actually fills the order. Dealer wins if any hired dealer
+    -- covers this zone with stock of sale.item — the player never sees
+    -- the offer in that case. Otherwise fall back to the player's own
+    -- inventory.
+    local dealerSlotId, dealerStock
+    if Dealers and Dealers.GetCoveringSlotForItem then
+        dealerSlotId, dealerStock = Dealers.GetCoveringSlotForItem(cid, zone.id, sale.item)
+    end
+    local route, routeStock
+    if dealerSlotId and dealerStock and dealerStock > 0 then
+        route, routeStock = "dealer", dealerStock
+    elseif (sale.playerOwned or 0) > 0 then
+        route, routeStock = "player", sale.playerOwned
+    else
+        return false, ("no route has stock (player=%d, dealer-in-zone=%d) — hire a dealer covering '%s' or carry stock yourself"):format(
+            sale.playerOwned or 0, dealerStock or 0, zone.label or zone.id)
+    end
+
+    local maxQty = math.min(Config.Dealing.maxQty or 10, routeStock)
     local qty = math.random(1, maxQty)
     local jitter = (Config.Dealing.priceJitter or 0.15)
     local mult = (zone.risk_mult or 1.0) * (1.0 + (math.random() * 2 - 1) * jitter)
     local unit = math.max(1, math.floor(sale.base * mult + 0.5))
+
+    if route == "dealer" then
+        local pt = Dealing.PickDealPoint(zone, ptIdx)
+        if not pt then
+            return false, ("zone '%s' has no usable deal point"):format(zone.label or zone.id)
+        end
+        local autoId = "auto_" .. genId("dl")
+        local slot = Dealers.GetSlot(dealerSlotId)
+        -- Spawn the customer ped on the deal point (broadcast).
+        TriggerClientEvent("pickle_drugs:dealingCustomerSpawn", -1, {
+            deal_id   = autoId,
+            customer  = cust,
+            zone_id   = zone.id,
+            pt        = pt,
+            owner_cid = cid,
+            owner_src = nil,
+        })
+        -- Spawn the dealer ped near the deal point (walks in).
+        TriggerClientEvent("pickle_drugs:dealerAutoSpawn", -1, {
+            deal_id      = autoId,
+            dealer_model = (slot and slot.model) or "g_m_y_lost_01",
+            pt           = pt,
+        })
+        local completeMs = (Config.Dealing and Config.Dealing.dealerAutoCompleteMs) or 12000
+        SetTimeout(completeMs, function()
+            Dealers.SettleAutoDeal(dealerSlotId, cid, sale.item, qty, unit)
+            TriggerClientEvent("pickle_drugs:dealingCustomerComplete", -1, {
+                deal_id   = autoId,
+                owner_src = nil,
+            })
+            TriggerClientEvent("pickle_drugs:dealerAutoDespawn", -1, autoId)
+        end)
+        Cooldowns[cid] = Cooldowns[cid] or {}
+        Cooldowns[cid][cust.id] = now() + (Config.Dealing.cooldownMs or 300000)
+        return true, ("dealer auto-fulfilled %dx %s @ $%d (slot=%s, zone=%s)"):format(
+            qty, sale.drug, unit, dealerSlotId, zone.label or zone.id)
+    end
 
     local deal = {
         id            = genId("dl"),
@@ -736,7 +806,7 @@ RegisterNetEvent("pickle_drugs:dealingComplete", function(dealId)
     end
 
     local drugCfg = Config.Drugs[d.drug]
-    local item    = drugCfg and drugCfg.cutting and drugCfg.cutting.harvestItem
+    local item    = drugCfg and drugCfg.harvestItem
     if not item then return end
     if not (Inventory and Inventory.GetItemCount and Inventory.RemoveItem) then return end
     if (Inventory.GetItemCount(src, item) or 0) < d.qty then
@@ -882,7 +952,7 @@ CreateThread(function()
         -- Config.Drugs[*].deal.basePrice isn't a silent dead-end.
         local saleable, unsaleable = {}, {}
         for drug, cfg in pairs(Config.Drugs or {}) do
-            local item = cfg.cutting and cfg.cutting.harvestItem
+            local item = cfg.harvestItem
             if item and cfg.deal and cfg.deal.basePrice then
                 saleable[#saleable + 1] = ("%s (item=%s @ $%s)"):format(drug, item, tostring(cfg.deal.basePrice))
             else

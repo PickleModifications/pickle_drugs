@@ -2,11 +2,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
     ChevronDown,
     Droplet,
-    Eye,
     Leaf,
     Mountain,
     Move,
+    Package,
     Scissors,
+    Settings as SettingsIcon,
     Sprout,
     Trash2,
     X,
@@ -14,12 +15,10 @@ import {
 
 import { fetchNui, useNuiEvent } from "@/lib/nui";
 import { CreatorPanel, type DrugOption, type PlotRow } from "./CreatorPanel";
-import { EmployeesPanel, type EmployeeRow } from "./EmployeesPanel";
-import { AssignerPanel, type AssignerPlot } from "./AssignerPanel";
-import { EmployeeInfoPanel } from "./EmployeeInfoPanel";
 import { HousingPanel, type Interior, type House } from "./HousingPanel";
 import { HouseManagePanel, type HouseManageData } from "./HouseManagePanel";
 import { HousePlacementHud, type PlacementHudData } from "./HousePlacementHud";
+import { WorkerPickerHud, type WorkerPickerHudData } from "./WorkerPickerHud";
 import { StoragePanel, type StorageData } from "./StoragePanel";
 import { ZonePickerHud, type ZonePickerHudData } from "./ZonePickerHud";
 import { Phone } from "./phone/Phone";
@@ -33,9 +32,9 @@ type ActionId =
     | "planting"
     | "watering"
     | "cutting"
-    | "inspect"
     | "move"
-    | "remove";
+    | "remove"
+    | "output";
 
 type StatusKey =
     | "needs_soil"
@@ -50,6 +49,7 @@ type ActionEntry = {
     icon: string;
     available: boolean;
     reason?: string;
+    settings?: boolean;
 };
 
 type SceneStatus = {
@@ -150,9 +150,10 @@ const ICON_MAP: Record<string, React.ElementType> = {
     sprout: Sprout,
     droplet: Droplet,
     scissors: Scissors,
-    eye: Eye,
     move: Move,
     trash: Trash2,
+    package: Package,
+    gear: SettingsIcon,
 };
 
 function ActionIcon({ name, className }: { name: string; className?: string }) {
@@ -191,12 +192,6 @@ const TONES: Record<ActionId, { hover: string; active: string }> = {
         active:
             "bg-fuchsia-500/30 ring-fuchsia-400/70 text-fuchsia-50 shadow-[0_0_18px_-6px_rgba(232,121,249,0.75)]",
     },
-    inspect: {
-        hover:
-            "hover:bg-violet-500/25 hover:ring-violet-400/70 hover:text-violet-50 hover:shadow-[0_0_14px_-6px_rgba(167,139,250,0.7)]",
-        active:
-            "bg-violet-500/30 ring-violet-400/70 text-violet-50 shadow-[0_0_18px_-6px_rgba(167,139,250,0.75)]",
-    },
     move: {
         hover:
             "hover:bg-amber-500/25 hover:ring-amber-400/70 hover:text-amber-50 hover:shadow-[0_0_14px_-6px_rgba(251,191,36,0.7)]",
@@ -208,6 +203,12 @@ const TONES: Record<ActionId, { hover: string; active: string }> = {
             "hover:bg-red-500/25 hover:ring-red-400/70 hover:text-red-50 hover:shadow-[0_0_14px_-6px_rgba(248,113,113,0.7)]",
         active:
             "bg-red-500/30 ring-red-400/70 text-red-50 shadow-[0_0_18px_-6px_rgba(248,113,113,0.75)]",
+    },
+    output: {
+        hover:
+            "hover:bg-cyan-500/25 hover:ring-cyan-400/70 hover:text-cyan-50 hover:shadow-[0_0_14px_-6px_rgba(34,211,238,0.7)]",
+        active:
+            "bg-cyan-500/30 ring-cyan-400/70 text-cyan-50 shadow-[0_0_18px_-6px_rgba(34,211,238,0.75)]",
     },
     menu: { hover: "", active: "" },
 };
@@ -312,43 +313,85 @@ function ActionsSection({
     onClose: () => void;
 }) {
     const inAction = activeAction !== "menu";
+    const mainActions = actions.filter((a) => !a.settings);
+    const settingsActions = actions.filter((a) => a.settings);
+    const [settingsOpen, setSettingsOpen] = useState(false);
+
+    // Close the popover whenever the player drops into a sub-action so
+    // the floating menu doesn't linger over the active scene.
+    useEffect(() => {
+        if (inAction) setSettingsOpen(false);
+    }, [inAction]);
+
+    const renderActionButton = (a: ActionEntry) => {
+        const isActive = activeAction === a.id;
+        const disabled = !a.available || (inAction && !isActive);
+        const tone = TONES[a.id] ?? TONES.menu;
+        return (
+            <button
+                key={a.id}
+                disabled={disabled}
+                onClick={() => {
+                    setSettingsOpen(false);
+                    isActive ? onCancelAction() : onSelect(a.id);
+                }}
+                title={a.reason ?? a.label}
+                className={
+                    "group relative flex flex-col items-center justify-center gap-1 rounded-lg px-3 py-2 min-w-[68px] ring-1 transition-all " +
+                    (isActive
+                        ? tone.active + " "
+                        : disabled
+                            ? "text-white/25 cursor-not-allowed bg-white/[0.02] ring-white/20 "
+                            : NEUTRAL_ENABLED + tone.hover + " ")
+                }
+            >
+                <ActionIcon name={a.icon} className="h-5 w-5" />
+                <span className="text-[10px] font-medium leading-none">
+                    {a.label}
+                </span>
+                {!a.available && a.reason && (
+                    <span className="absolute -top-7 left-1/2 -translate-x-1/2 text-[10px] text-white/70 bg-black/80 px-2 py-0.5 rounded whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none ring-1 ring-white/10">
+                        {a.reason}
+                    </span>
+                )}
+            </button>
+        );
+    };
+
+    const settingsDisabled = inAction || settingsActions.length === 0;
 
     return (
         <div className="px-3 py-3 flex items-center gap-2">
             <div className="flex items-center gap-1.5">
-                {actions.map((a) => {
-                    const isActive = activeAction === a.id;
-                    const disabled = !a.available || (inAction && !isActive);
-                    const tone = TONES[a.id] ?? TONES.menu;
-                    return (
+                {mainActions.map(renderActionButton)}
+
+                {settingsActions.length > 0 && (
+                    <div className="relative">
                         <button
-                            key={a.id}
-                            disabled={disabled}
-                            onClick={() =>
-                                isActive ? onCancelAction() : onSelect(a.id)
-                            }
-                            title={a.reason ?? a.label}
+                            disabled={settingsDisabled}
+                            onClick={() => setSettingsOpen((o) => !o)}
+                            title="Settings"
                             className={
-                                "group relative flex flex-col items-center justify-center gap-1 rounded-lg px-3 py-2 min-w-[68px] ring-1 transition-all " +
-                                (isActive
-                                    ? tone.active + " "
-                                    : disabled
-                                        ? "text-white/25 cursor-not-allowed bg-white/[0.02] ring-white/20 "
-                                        : NEUTRAL_ENABLED + tone.hover + " ")
+                                "flex flex-col items-center justify-center gap-1 rounded-lg px-3 py-2 min-w-[68px] ring-1 transition-all " +
+                                (settingsDisabled
+                                    ? "text-white/25 cursor-not-allowed bg-white/[0.02] ring-white/20 "
+                                    : settingsOpen
+                                        ? "bg-white/[0.12] ring-white/40 text-white "
+                                        : NEUTRAL_ENABLED + "hover:bg-white/[0.10] hover:ring-white/40 ")
                             }
                         >
-                            <ActionIcon name={a.icon} className="h-5 w-5" />
+                            <ActionIcon name="gear" className="h-5 w-5" />
                             <span className="text-[10px] font-medium leading-none">
-                                {a.label}
+                                Settings
                             </span>
-                            {!a.available && a.reason && (
-                                <span className="absolute -top-7 left-1/2 -translate-x-1/2 text-[10px] text-white/70 bg-black/80 px-2 py-0.5 rounded whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none ring-1 ring-white/10">
-                                    {a.reason}
-                                </span>
-                            )}
                         </button>
-                    );
-                })}
+                        {settingsOpen && (
+                            <div className="absolute left-1/2 -translate-x-1/2 bottom-[calc(100%+8px)] z-10 rounded-xl bg-black/95 ring-1 ring-white/15 shadow-2xl p-2 flex items-center gap-1.5">
+                                {settingsActions.map(renderActionButton)}
+                            </div>
+                        )}
+                    </div>
+                )}
             </div>
 
             <div className="h-10 w-px bg-white/10 mx-1" />
@@ -419,12 +462,6 @@ function ActionHintInline({ activeAction }: { activeAction: ActionId }) {
                 Click the cap to pop it · grab the capsule and tilt with{" "}
                 <Kbd>A</Kbd> / <Kbd>D</Kbd> to drop the seed · click each rubble
                 pile to bury
-            </>
-        );
-    } else if (activeAction === "inspect") {
-        content = (
-            <>
-                Inspecting your plant — press <Kbd>Esc</Kbd> or Back to return
             </>
         );
     }
@@ -554,25 +591,6 @@ function App() {
         enableCancel: boolean;
     } | null>(null);
 
-    // Employees roster surface
-    const [employeesOpen, setEmployeesOpen] = useState(false);
-    const [employeesHidden, setEmployeesHidden] = useState(false);
-    const [employeesList, setEmployeesList] = useState<EmployeeRow[]>([]);
-
-    // Plot assigner surface
-    const [assignerOpen, setAssignerOpen] = useState(false);
-    const [assignerData, setAssignerData] = useState<{
-        empId: string;
-        firstName: string;
-        lastName: string;
-        plots: AssignerPlot[];
-        assignedPlots: string[];
-    } | null>(null);
-
-    // Employee info popup
-    const [empInfoOpen, setEmpInfoOpen] = useState(false);
-    const [empInfoData, setEmpInfoData] = useState<EmployeeRow | null>(null);
-
     // Housing admin
     const [housingOpen, setHousingOpen] = useState(false);
     const [housingHidden, setHousingHidden] = useState(false);
@@ -581,10 +599,12 @@ function App() {
 
     // Player house management
     const [houseManageOpen, setHouseManageOpen] = useState(false);
+    const [houseManageHidden, setHouseManageHidden] = useState(false);
     const [houseManageData, setHouseManageData] = useState<HouseManageData | null>(null);
 
     // Placement HUD
     const [placementHud, setPlacementHud] = useState<PlacementHudData | null>(null);
+    const [workerPickerHud, setWorkerPickerHud] = useState<WorkerPickerHudData | null>(null);
 
     // Storage locker panel
     const [storageData, setStorageData] = useState<StorageData | null>(null);
@@ -646,49 +666,6 @@ function App() {
         },
     );
 
-    // Employees roster
-    useNuiEvent<{ employees?: EmployeeRow[] }>("openEmployees", (data) => {
-        setEmployeesList(data?.employees ?? []);
-        setEmployeesHidden(false);
-        setEmployeesOpen(true);
-    });
-    useNuiEvent<void>("closeEmployees", () => setEmployeesOpen(false));
-    useNuiEvent<{ employees?: EmployeeRow[] }>("employeesList", (data) => {
-        if (data?.employees) setEmployeesList(data.employees);
-    });
-    useNuiEvent<void>("employeesMinimize", () => setEmployeesHidden(true));
-    useNuiEvent<{ employees?: EmployeeRow[] }>("employeesRestore", (data) => {
-        setEmployeesHidden(false);
-        if (data?.employees) setEmployeesList(data.employees);
-    });
-
-    // Assigner
-    useNuiEvent<{
-        empId: string;
-        firstName: string;
-        lastName: string;
-        plots: AssignerPlot[];
-        assignedPlots: string[];
-    }>("openAssigner", (data) => {
-        if (!data) return;
-        setAssignerData(data);
-        setAssignerOpen(true);
-    });
-    useNuiEvent<void>("closeAssigner", () => {
-        setAssignerOpen(false);
-        setAssignerData(null);
-    });
-
-    // Employee info popup
-    useNuiEvent<{ employee: EmployeeRow }>("openEmployeeInfo", (data) => {
-        if (!data?.employee) return;
-        setEmpInfoData(data.employee);
-        setEmpInfoOpen(true);
-    });
-    useNuiEvent<void>("closeEmployeeInfo", () => {
-        setEmpInfoOpen(false);
-        setEmpInfoData(null);
-    });
     // Housing admin events
     useNuiEvent<{ panel: "houses" | "interiors"; interiors: Interior[]; houses: House[] }>(
         "openHousing",
@@ -711,16 +688,27 @@ function App() {
     useNuiEvent<HouseManageData>("openHouseManage", (data) => {
         if (!data) return;
         setHouseManageData(data);
+        setHouseManageHidden(false);
         setHouseManageOpen(true);
     });
     useNuiEvent<void>("closeHouseManage", () => {
         setHouseManageOpen(false);
         setHouseManageData(null);
+        setHouseManageHidden(false);
     });
+    // Mid-flow visibility toggle. While a placement / move flow is running
+    // we hide the panel (instead of unmounting it) so it pops back into
+    // the same tab/state when the placement completes.
+    useNuiEvent<void>("houseManageMinimize", () => setHouseManageHidden(true));
+    useNuiEvent<void>("houseManageRestore", () => setHouseManageHidden(false));
 
     // Placement HUD
     useNuiEvent<PlacementHudData>("openPlacementHud", (data) => setPlacementHud(data ?? null));
     useNuiEvent<void>("closePlacementHud", () => setPlacementHud(null));
+
+    // Worker plot-picker HUD (raycast pick a plot to assign to a worker)
+    useNuiEvent<WorkerPickerHudData>("openWorkerPickerHud", (data) => setWorkerPickerHud(data ?? null));
+    useNuiEvent<void>("closeWorkerPickerHud", () => setWorkerPickerHud(null));
 
     // Storage locker panel
     useNuiEvent<StorageData>("openStoragePanel", (data) => setStorageData(data ?? null));
@@ -772,7 +760,7 @@ function App() {
     const activeAction = status?.activeAction ?? "menu";
 
     useEffect(() => {
-        if (!open || activeAction === "menu" || activeAction === "inspect") return;
+        if (!open || activeAction === "menu") return;
         const tick = window.setInterval(() => {
             const payload = {
                 cursorX: cursorRef.current.x,
@@ -851,14 +839,12 @@ function App() {
     const anyOpen =
         open ||
         creatorOpen ||
-        employeesOpen ||
-        assignerOpen ||
-        empInfoOpen ||
         housingOpen ||
         houseManageOpen ||
         phoneOpen ||
         !!storageData ||
         !!placementHud ||
+        !!workerPickerHud ||
         !!zonePickerHud ||
         !!gizmoHelp;
 
@@ -902,10 +888,15 @@ function App() {
 
     if (houseManageOpen && houseManageData && !open) {
         return (
-            <HouseManagePanel
-                data={houseManageData}
-                onClose={() => fetchNui("houseManageClose")}
-            />
+            <>
+                <HouseManagePanel
+                    data={houseManageData}
+                    hidden={houseManageHidden}
+                    onClose={() => fetchNui("houseManageClose")}
+                />
+                {placementHud && <HousePlacementHud data={placementHud} />}
+                {workerPickerHud && <WorkerPickerHud data={workerPickerHud} />}
+            </>
         );
     }
 
@@ -920,6 +911,10 @@ function App() {
 
     if (placementHud && !open) {
         return <HousePlacementHud data={placementHud} />;
+    }
+
+    if (workerPickerHud && !open) {
+        return <WorkerPickerHud data={workerPickerHud} />;
     }
 
     if (zonePickerHud && !open) {
@@ -937,41 +932,6 @@ function App() {
                 />
                 {gizmoHelp && <GizmoHelpBar {...gizmoHelp} />}
             </>
-        );
-    }
-
-    if (employeesOpen && !open) {
-        return (
-            <>
-                <EmployeesPanel
-                    employees={employeesList}
-                    hidden={employeesHidden}
-                    onClose={() => fetchNui("employeesClose")}
-                />
-                {gizmoHelp && <GizmoHelpBar {...gizmoHelp} />}
-            </>
-        );
-    }
-
-    if (assignerOpen && assignerData && !open) {
-        return (
-            <AssignerPanel
-                empId={assignerData.empId}
-                firstName={assignerData.firstName}
-                lastName={assignerData.lastName}
-                plots={assignerData.plots}
-                initiallyAssigned={assignerData.assignedPlots}
-                onClose={() => fetchNui("assignerClose")}
-            />
-        );
-    }
-
-    if (empInfoOpen && empInfoData && !open) {
-        return (
-            <EmployeeInfoPanel
-                employee={empInfoData}
-                onClose={() => fetchNui("employeeInfoClose")}
-            />
         );
     }
 
@@ -1003,7 +963,7 @@ function App() {
 
             {/* Bottom plant console — centered, fully rounded */}
             {status && (
-                <div className="absolute left-1/2 -translate-x-1/2 bottom-4 pointer-events-auto rounded-2xl bg-black/95 ring-1 ring-white/10 shadow-2xl overflow-hidden w-fit">
+                <div className="absolute left-1/2 -translate-x-1/2 bottom-4 pointer-events-auto rounded-2xl bg-black/95 ring-1 ring-white/10 shadow-2xl w-fit">
                     {/* Header: label (left) · live tip (center). Fixed height so
                         the container never grows when tips contain Kbd chips. */}
                     <div className="grid grid-cols-[auto_1fr_auto] items-center gap-4 px-5 h-9 border-b border-white/5 bg-white/[0.02]">

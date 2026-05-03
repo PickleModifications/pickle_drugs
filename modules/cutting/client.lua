@@ -11,7 +11,8 @@ local CuttingState = nil
 --- director (which tweens our cam from the menu pose to this pose before
 --- handing control to the cutting flow).
 function GetCuttingCamPreset(spot, drugCfg)
-    local cam = drugCfg.cutting.camera or {}
+    local sceneCfg = (Config.PlantScene and Config.PlantScene.cutting) or {}
+    local cam = sceneCfg.camera or {}
     local harvest   = Grow.HarvestStage(drugCfg)
     local plantHash = joaat(drugCfg.stages[harvest].model)
     local budHash   = joaat(drugCfg.stages[harvest].buds.model)
@@ -36,10 +37,11 @@ function GetCuttingCamPreset(spot, drugCfg)
     local camX = center.x + math.sin(rad) * distance
     local camY = center.y - math.cos(rad) * distance
     local camZ = aimZ + (cam.heightOffset or 0.0)
+    local lookZ = aimZ + (cam.lookOffset or 0.0)
 
     return {
         coords = vector3(camX, camY, camZ),
-        point  = vector3(center.x, center.y, aimZ),
+        point  = vector3(center.x, center.y, lookZ),
         fov    = fov,
     }
 end
@@ -101,8 +103,8 @@ end
 --- Spawns a free scissors prop. The cutting thread positions it each frame
 --- at the cursor's projected world location (mirrors the pitcher in the
 --- watering scene), so no animation or bone attach is needed.
-local function SpawnFloatingScissors(drugCfg)
-    local cut = drugCfg.cutting
+local function SpawnFloatingScissors(_drugCfg)
+    local cut = Config.PlantScene and Config.PlantScene.cutting
     if not cut or not cut.tool then return nil end
     local hash = LoadModel(cut.tool)
     if not hash then return nil end
@@ -124,7 +126,7 @@ local function CleanupCuttingView(skipFade)
 
     local embedded = CuttingState.embedded
     local onClose  = CuttingState.onClose
-    local fadeMs = (CuttingState.drugCfg and CuttingState.drugCfg.cutting and CuttingState.drugCfg.cutting.fadeMs) or 400
+    local fadeMs = (Config.PlantScene and Config.PlantScene.cutting and Config.PlantScene.cutting.fadeMs) or 400
     if not skipFade and not embedded then
         DoScreenFadeOut(fadeMs)
         while not IsScreenFadedOut() do Wait(0) end
@@ -197,7 +199,7 @@ local function RunCuttingThread()
                 local upY = rXz * fx - rXx * fz
                 local upZ = rXx * fy - rXy * fx
 
-                local fovRad = math.rad(CuttingState.drugCfg.cutting.camera.fov or 35.0)
+                local fovRad = math.rad((Config.PlantScene and Config.PlantScene.cutting and Config.PlantScene.cutting.camera and Config.PlantScene.cutting.camera.fov) or 35.0)
                 local screenH = math.tan(fovRad * 0.5) * depth
                 local aspect = GetAspectRatio(false) or 1.777
                 local screenW = screenH * aspect
@@ -232,12 +234,13 @@ function OpenCuttingScene(plotId, opts)
     if not plot or not spot then return end
 
     local drugCfg = Config.Drugs[plot.drug]
-    if not drugCfg or not drugCfg.cutting then return end
+    local sceneCfg = Config.PlantScene and Config.PlantScene.cutting
+    if not drugCfg or not sceneCfg then return end
     if plot.stage ~= Grow.HarvestStage(drugCfg) then return end
 
     local center  = vector3(spot.coords.x, spot.coords.y, spot.coords.z)
     local heading = spot.coords.w or 0.0
-    local fadeMs  = drugCfg.cutting.fadeMs or 400
+    local fadeMs  = sceneCfg.fadeMs or 400
 
     if not embedded then
         DoScreenFadeOut(fadeMs)
@@ -347,7 +350,7 @@ RegisterNUICallback("clickAt", function(data, cb)
     local upZ = rXx * fy - rXy * fx
 
     local depth   = 1.0
-    local fovRad  = math.rad((drugCfg.cutting.camera and drugCfg.cutting.camera.fov) or 35.0)
+    local fovRad  = math.rad((Config.PlantScene and Config.PlantScene.cutting and Config.PlantScene.cutting.camera and Config.PlantScene.cutting.camera.fov) or 35.0)
     local screenH = math.tan(fovRad * 0.5) * depth
     local aspect  = GetAspectRatio(false) or 1.777
     local screenW = screenH * aspect
@@ -420,7 +423,8 @@ RegisterNUICallback("clickAt", function(data, cb)
     FreezeEntityPosition(bud, false)
     SetEntityCollision(bud, false, false)
 
-    local carrierHash = LoadModel(drugCfg.cutting.fallCarrier or "sf_prop_sf_apple_01a")
+    local cutCfg = (Config.PlantScene and Config.PlantScene.cutting) or {}
+    local carrierHash = LoadModel(cutCfg.fallCarrier or "sf_prop_sf_apple_01a")
     if carrierHash then
         local carrier = CreateObject(carrierHash, bc.x, bc.y, bc.z, false, false, true)
         if carrier and DoesEntityExist(carrier) then
@@ -443,7 +447,7 @@ RegisterNUICallback("clickAt", function(data, cb)
     cb({ ok = true, hit = true, remaining = remaining })
 
     local lastBud = remaining <= 0
-    SetTimeout(drugCfg.cutting.fallMs or 2000, function()
+    SetTimeout(cutCfg.fallMs or 2000, function()
         if not CuttingState then return end
         for i, fb in ipairs(CuttingState.fallingBuds) do
             if fb == bud then table.remove(CuttingState.fallingBuds, i) break end

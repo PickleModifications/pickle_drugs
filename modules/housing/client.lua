@@ -701,6 +701,31 @@ local function placementLoop()
     end
 end
 
+-- ─── Post-placement hooks ─────────────────────────────────────────────────
+-- Anyone about to call Housing.StartPlacement (directly or via a helper
+-- like Storage.MoveLocker) can register a one-shot to fire after the
+-- placement loop ends (regardless of confirm vs cancel). The manage
+-- panel uses this to restore itself once the player finishes placing.
+-- Defined above Housing.StartPlacement so its closure resolves the local
+-- at function-creation time — Lua doesn't hoist locals.
+local NextPlacementEndHooks = {}
+
+function Housing.OnNextPlacementEnd(fn)
+    if type(fn) == "function" then
+        NextPlacementEndHooks[#NextPlacementEndHooks + 1] = fn
+    end
+end
+
+local function drainPlacementEndHooks()
+    if #NextPlacementEndHooks == 0 then return end
+    local hooks = NextPlacementEndHooks
+    NextPlacementEndHooks = {}
+    for _, fn in ipairs(hooks) do
+        local ok, err = pcall(fn)
+        if not ok then debugPrint("placement end hook error:", err) end
+    end
+end
+
 --- Public: start a placement flow. The player picks an entity (drug);
 --- this resolves footprint dims and lets them place it anywhere across
 --- the property's zones via raycast. Confirm fires
@@ -780,6 +805,7 @@ function Housing.StartPlacement(opts)
             DeleteEntity(entity)
         end
         SendNUIMessage({ action = "closePlacementHud" })
+        drainPlacementEndHooks()
     end)
 end
 
@@ -787,12 +813,62 @@ end
 
 local ManageOpen = false
 local OpenHouseId = nil
+local ManageWalking = false
+local ManageInPlacement = false
+local MANAGE_WALK_KEY_LABEL = "ESC"
+
+local function pushManageWalkState()
+    SendNUIMessage({
+        action = "houseManageWalkState",
+        data   = { walking = ManageWalking, key = MANAGE_WALK_KEY_LABEL },
+    })
+end
+
+--- While walking, NUI focus is released so the player can move around
+--- and inspect the house in-world; the panel stays mounted (with reduced
+--- opacity) and is non-interactive until walk mode is toggled off.
+local function setManageWalking(walking)
+    if not ManageOpen then return end
+    walking = walking and true or false
+    if ManageWalking == walking then return end
+    ManageWalking = walking
+    SetNuiFocus(not ManageWalking, not ManageWalking)
+    pushManageWalkState()
+end
+
+--- Hide the panel for the duration of a placement / move flow. NUI focus
+--- is dropped (placement consumes its own keys) and the panel is told to
+--- visibility:hidden. ManageInPlacement gates the ESC handler so it
+--- doesn't toggle walk mode while placement has its own ESC binding.
+local function minimizeManage()
+    if not ManageOpen then return end
+    ManageInPlacement = true
+    ManageWalking = false
+    SetNuiFocus(false, false)
+    SendNUIMessage({ action = "houseManageMinimize" })
+    pushManageWalkState()
+end
+
+--- Reverse minimizeManage — restore focus and unhide the panel. Called
+--- from post-placement hooks regardless of confirm vs cancel.
+local function restoreManage()
+    ManageInPlacement = false
+    if not ManageOpen then return end
+    SetNuiFocus(true, true)
+    SendNUIMessage({ action = "houseManageRestore" })
+    pushManageWalkState()
+end
 
 --- Refetch everything the manage panel needs and push it as an
 --- openHouseManage payload. Used by the initial open and by the
 --- houseUpdate listener so the panel never goes stale after a purchase
 --- / rent / lease change while it's open.
-local function buildAndSendHouseManage(houseId)
+---
+--- `opts.initialAssigner` (optional) bakes an assigner-state payload into
+--- the open message so the panel mounts straight on the Workers tab in
+--- assigner mode — avoids the "flashes Property tab for ~150ms before
+--- switching" gap when entering via the worker-ped target.
+local function buildAndSendHouseManage(houseId, opts)
     local detail = lib.callback.await("pickle_drugs:getHouseDetail", false, houseId)
     if not detail then return false end
     local zonePlots = {}
@@ -829,23 +905,29 @@ local function buildAndSendHouseManage(houseId)
             storageTypes = storageTypes,
             employees    = employees,
             pedModels    = pedModels,
+            initialAssigner = opts and opts.initialAssigner or nil,
         },
     })
     return true
 end
 
-local function openManage(houseId)
+local function openManage(houseId, opts)
     if ManageOpen then return end
-    if not buildAndSendHouseManage(houseId) then return end
+    if not buildAndSendHouseManage(houseId, opts) then return end
     ManageOpen = true
     OpenHouseId = houseId
+    ManageWalking = false
+    ManageInPlacement = false
     SetNuiFocus(true, true)
+    pushManageWalkState()
 end
 
 local function closeManage()
     if not ManageOpen then return end
     ManageOpen = false
     OpenHouseId = nil
+    ManageWalking = false
+    ManageInPlacement = false
     SetNuiFocus(false, false)
     SendNUIMessage({ action = "closeHouseManage" })
 end
@@ -931,6 +1013,41 @@ RegisterNUICallback("houseManageClose", function(_, cb)
     cb({ ok = true })
 end)
 
+RegisterNUICallback("houseManageToggleWalk", function(_, cb)
+    cb({ ok = true })
+    if not ManageOpen or ManageInPlacement then return end
+    setManageWalking(not ManageWalking)
+end)
+
+-- ESC handler. Mirrors the housing_admin pattern: kill every pause-menu
+-- input each frame and bounce the engine back out of any frontend it
+-- has already flagged before our IsDisabledControlJustReleased check
+-- fires. Only runs while the manage panel is open AND not currently
+-- inside a placement / move flow (those have their own ESC suppression
+-- and consume the press for cancel).
+CreateThread(function()
+    while true do
+        if ManageOpen and not ManageInPlacement then
+            DisableControlAction(0, 199, true) -- INPUT_FRONTEND_PAUSE
+            DisableControlAction(0, 200, true) -- INPUT_FRONTEND_PAUSE_ALTERNATE
+            DisableControlAction(0, 322, true) -- INPUT_FRONTEND_PAUSE_ALTERNATE (alt)
+            if IsPauseMenuActive() then
+                SetFrontendActive(false)
+                ActivateFrontendMenu(`FE_MENU_VERSION_EMPTY_NO_BACKGROUND`, true, -1)
+            end
+            if IsDisabledControlJustReleased(0, 199)
+               or IsDisabledControlJustReleased(0, 200)
+               or IsDisabledControlJustReleased(0, 322)
+            then
+                setManageWalking(not ManageWalking)
+            end
+            Wait(0)
+        else
+            Wait(100)
+        end
+    end
+end)
+
 RegisterNUICallback("housePurchase", function(data, cb)
     cb({ ok = true })
     if data and data.houseId and data.mode then
@@ -980,14 +1097,453 @@ RegisterNUICallback("houseDismissEmployee", function(data, cb)
     SetTimeout(400, function() pushHouseEmployees(data.houseId) end)
 end)
 
--- "Assign Plots" on a worker row in the house panel. Hands off to the
--- existing employee assigner UI (modules/employees/client.lua), which is
--- the same widget the admin /employees command uses.
+-- "Assign Plots" on a worker row in the house panel. The standalone
+-- assigner UI (modules/employees/client.lua) is admin-only by /employees
+-- now; players manage their workers' plot assignments inline inside the
+-- manage panel itself. We just fetch the assignable plot list + the
+-- worker's current assignment and push it back into the panel as a
+-- houseManageAssignerData event.
+--- Build the assigner payload for a worker bound to `houseId`. Returns
+--- nil if the employee is not in the house's roster (e.g. just dismissed).
+local function buildAssignerData(empId, houseId)
+    if not empId or not houseId then return nil end
+    local plots = lib.callback.await("pickle_drugs:getAssignablePlots", false, empId) or {}
+    local list = lib.callback.await("pickle_drugs:listHouseEmployees", false, houseId) or {}
+    local emp
+    for _, e in ipairs(list) do
+        if e.id == empId then emp = e break end
+    end
+    if not emp then return nil end
+    return {
+        empId         = empId,
+        firstName     = emp.firstName,
+        lastName      = emp.lastName,
+        plots         = plots,
+        assignedPlots = emp.assignedPlots or {},
+        maxPlots      = (Config.Employees and Config.Employees.maxPlotsPerWorker) or 10,
+    }
+end
+
+--- Push the inline assigner state into the open manage panel for a
+--- given employee. Used by the in-panel "Assign plots" button and after
+--- the in-world picker exits.
+local function pushAssignerForEmployee(empId)
+    if not empId or not OpenHouseId then return end
+    local data = buildAssignerData(empId, OpenHouseId)
+    if not data then return end
+    SendNUIMessage({ action = "houseManageAssignerData", data = data })
+end
+
 RegisterNUICallback("houseAssignWorkerPlots", function(data, cb)
     cb({ ok = true })
-    if not data or not data.empId then return end
-    closeManage()
-    if Employees and Employees.OpenAssigner then Employees.OpenAssigner(data.empId) end
+    if data and data.empId then pushAssignerForEmployee(data.empId) end
+end)
+
+--- Worker ped → "Manage Worker" target. Resolves the employee's house,
+--- opens the manage panel for it, and auto-launches the assigner dialog
+--- so the player lands directly on the per-employee plot picker.
+RegisterNetEvent("pickle_drugs:openWorkerInManagePanel", function(empId)
+    if not empId then return end
+    local emp = GetEmployee and GetEmployee(empId) or nil
+    local houseId = emp and emp.house_id or nil
+    if not houseId then return end
+    local assignerData = buildAssignerData(empId, houseId)
+    if ManageOpen and OpenHouseId == houseId then
+        -- Already on this house — just push the assigner state.
+        if assignerData then
+            SendNUIMessage({ action = "houseManageAssignerData", data = assignerData })
+        end
+        return
+    end
+    if ManageOpen then closeManage() end
+    -- Bake the assigner state into the open payload so the panel mounts
+    -- straight on the Workers tab in assigner mode (no flash of the
+    -- default Property tab while waiting for a follow-up message).
+    openManage(houseId, { initialAssigner = assignerData })
+end)
+
+RegisterNUICallback("houseManageAssignerSave", function(data, cb)
+    cb({ ok = true })
+    if data and data.empId and type(data.plotIds) == "table" then
+        TriggerServerEvent("pickle_drugs:assignPlots", data.empId, data.plotIds)
+    end
+end)
+
+-- ─── Worker plot picker (in-world raycast) ────────────────────────────────
+-- Drives the manage-panel "+ add plot" flow. The player clicks an empty
+-- slot in the inline assigner; we minimise the panel, drop NUI focus, and
+-- render coloured footprint boxes over every known plot in the worker's
+-- house:
+--   white — already assigned to this worker (preserved, can't re-pick)
+--   red   — assigned to a different worker (locked)
+--   green — the plot currently under the camera ray (valid pick target)
+-- Confirm (E / LMB) appends the picked plot id to the worker's list and
+-- saves; ESC cancels back to the panel.
+
+local WorkerPicker = nil
+
+local function drawOutlineBox(wx, wy, wz, heading, sizeX, sizeY, color, alpha)
+    -- Reuse drawFootprintBox via two stacked layers to give the picker
+    -- a slightly thicker silhouette than the placement preview without
+    -- adding a new helper.
+    drawFootprintBox(wx, wy, wz, heading, sizeX, sizeY, color, alpha)
+end
+
+local function pointInOrientedBox(px, py, cx, cy, heading, sizeX, sizeY)
+    local hRad = math.rad(heading or 0.0)
+    local cosH, sinH = math.cos(-hRad), math.sin(-hRad)
+    local dx, dy = px - cx, py - cy
+    local lx = cosH * dx - sinH * dy
+    local ly = sinH * dx + cosH * dy
+    return math.abs(lx) <= sizeX / 2 and math.abs(ly) <= sizeY / 2
+end
+
+local function plotUnderRay(plots, hitX, hitY, hitZ)
+    -- Linear scan is fine — house plot count is tiny. We accept the
+    -- nearest plot whose footprint contains the ray-hit xy and is within
+    -- a generous z tolerance of the plot origin.
+    local best, bestD2 = nil, math.huge
+    for _, p in ipairs(plots) do
+        if p.sizeX and p.sizeY and math.abs((hitZ or 0.0) - (p.z or 0.0)) <= 1.5 then
+            if pointInOrientedBox(hitX, hitY, p.x or 0.0, p.y or 0.0,
+                p.w or 0.0, p.sizeX, p.sizeY) then
+                local dx = (hitX - p.x); local dy = (hitY - p.y)
+                local d2 = dx * dx + dy * dy
+                if d2 < bestD2 then best, bestD2 = p, d2 end
+            end
+        end
+    end
+    return best
+end
+
+--- Refresh the panel's assigner state for the open employee. Called on
+--- picker exit (confirm or cancel) so the slot grid reflects the latest
+--- assigned set after the server round-trip.
+local function refreshAssignerForOpenWorker(empId)
+    if not empId then return end
+    -- Small delay so the server has applied the new list before we read
+    -- it back through getAssignablePlots / listHouseEmployees.
+    SetTimeout(150, function() pushAssignerForEmployee(empId) end)
+end
+
+local function endWorkerPicker(commit)
+    local p = WorkerPicker
+    if not p then return end
+    WorkerPicker = nil
+    SendNUIMessage({ action = "closeWorkerPickerHud" })
+    -- Re-show the manage panel before pushing the assigner refresh —
+    -- restoreManage flips visibility:hidden off and reclaims NUI focus.
+    if ManageOpen then restoreManage() end
+    if commit and commit.plotId then
+        local nextIds = { table.unpack(p.assigned) }
+        nextIds[#nextIds + 1] = commit.plotId
+        TriggerServerEvent("pickle_drugs:assignPlots", p.empId, nextIds)
+    end
+    refreshAssignerForOpenWorker(p.empId)
+end
+
+local function startWorkerPicker(empId)
+    if WorkerPicker or not empId or not ManageOpen then return end
+    local plots = lib.callback.await("pickle_drugs:getAssignablePlots", false, empId) or {}
+    if #plots == 0 then return end
+
+    local maxPlots = (Config.Employees and tonumber(Config.Employees.maxPlotsPerWorker)) or 10
+    local mine, others, available, assignedIds = {}, {}, {}, {}
+    local houseId
+    for _, p in ipairs(plots) do
+        houseId = houseId or p.houseId
+        if p.ownedByMe then
+            mine[#mine + 1] = p
+            assignedIds[#assignedIds + 1] = p.id
+        elseif p.ownerEmpId then
+            others[#others + 1] = p
+        else
+            available[#available + 1] = p
+        end
+    end
+
+    if #assignedIds >= maxPlots then
+        -- No room — bail without entering the picker.
+        return
+    end
+    if #available == 0 then return end
+
+    minimizeManage()
+
+    WorkerPicker = {
+        empId     = empId,
+        houseId   = houseId,
+        assigned  = assignedIds,
+        mine      = mine,
+        others    = others,
+        available = available,
+    }
+
+    SendNUIMessage({
+        action = "openWorkerPickerHud",
+        data = {
+            firstName = nil, -- panel already shows the worker; HUD is generic
+            slotsUsed = #assignedIds,
+            slotsMax  = maxPlots,
+            available = #available,
+        },
+    })
+
+    CreateThread(function()
+        local enteredAt = GetGameTimer()
+        local cfg = Config.Housing.placement
+        local validColor   = cfg.validColor   or { r = 80,  g = 200, b = 120 }
+        local invalidColor = cfg.invalidColor or { r = 230, g = 80,  b = 80  }
+        local mineColor    = { r = 240, g = 240, b = 240 }
+        local otherColor   = invalidColor
+
+        while WorkerPicker do
+            Wait(0)
+            local p = WorkerPicker
+            if not p then break end
+
+            -- Only the "invalid for picking" cells are drawn — taken plots
+            -- (white = mine, red = others). The blank zone carpet is left
+            -- off so the world reads as "everything you don't see is free
+            -- space; aim at one of these to (re)assign".
+            -- Render lockout (white) and other-worker (red) boxes always.
+            for _, e in ipairs(p.mine) do
+                drawOutlineBox(e.x, e.y, e.z, e.w or 0.0, e.sizeX, e.sizeY, mineColor, 160)
+            end
+            for _, e in ipairs(p.others) do
+                drawOutlineBox(e.x, e.y, e.z, e.w or 0.0, e.sizeX, e.sizeY, otherColor, 160)
+            end
+
+            -- Hover plot. Raycast against world, then test against each
+            -- available plot's oriented footprint. Green when a hit lands
+            -- inside an available plot.
+            local hover = nil
+            local hit = raycastFromCamera(60.0)
+            if hit then
+                -- 1x1 reticle at the raycast hit, oriented to the gameplay
+                -- camera heading so it reads as "where you're aiming". A
+                -- separate, dimmer tint when no plot is under the cursor;
+                -- green when one is.
+                hover = plotUnderRay(p.available, hit.x, hit.y, hit.z)
+                if hover then
+                    drawOutlineBox(hover.x, hover.y, hover.z, hover.w or 0.0,
+                        hover.sizeX, hover.sizeY, validColor, 200)
+                else
+                    -- 1x1 cam-aligned reticle only when there's nothing
+                    -- pickable under the cursor — once the player has a
+                    -- valid target the plot footprint is the reticle.
+                    local cell = (Config.Housing and Config.Housing.gridCellSize) or 0.5
+                    local camRot = GetGameplayCamRot(2)
+                    local camYaw = (camRot and camRot.z) or 0.0
+                    drawOutlineBox(hit.x, hit.y, hit.z, camYaw, cell, cell,
+                        { r = 200, g = 200, b = 200 }, 120)
+                end
+            end
+
+            -- Input — same suppression pattern as Housing.StartPlacement.
+            DisableControlAction(0, 38,  true) -- E confirm
+            DisableControlAction(0, 24,  true) -- LMB
+            DisableControlAction(0, 25,  true) -- RMB
+            DisableControlAction(0, 199, true)
+            DisableControlAction(0, 200, true)
+            DisableControlAction(0, 322, true)
+            if IsPauseMenuActive() then
+                SetFrontendActive(false)
+                ActivateFrontendMenu(`FE_MENU_VERSION_EMPTY_NO_BACKGROUND`, true, -1)
+            end
+
+            local pastBuffer = (GetGameTimer() - enteredAt) > 200
+
+            if pastBuffer and hover and (
+                IsDisabledControlJustPressed(0, 38)
+                or IsDisabledControlJustPressed(0, 24)
+            ) then
+                endWorkerPicker({ plotId = hover.id })
+                return
+            end
+
+            if pastBuffer and (
+                IsDisabledControlJustReleased(0, 199)
+                or IsDisabledControlJustReleased(0, 200)
+                or IsDisabledControlJustReleased(0, 322)
+            ) then
+                endWorkerPicker(nil)
+                return
+            end
+        end
+    end)
+end
+
+RegisterNUICallback("housePickWorkerPlot", function(data, cb)
+    cb({ ok = true })
+    if data and data.empId then startWorkerPicker(data.empId) end
+end)
+
+-- ─── Plot output-destination picker (in-world raycast for a locker) ───────
+-- Triggered from the plant scene's Settings → "Output Destination" entry.
+-- Same shape as the worker plot picker: zone-grid carpet, footprint boxes
+-- over every locker (white = currently selected, neutral grey = pickable),
+-- 1x1 reticle at the cam ray, and a HUD via NUI.
+
+local OutputPicker = nil
+
+local function lockerUnderRay(lockers, hitX, hitY, hitZ)
+    local best, bestD2 = nil, math.huge
+    for _, l in ipairs(lockers) do
+        if l.sizeX and l.sizeY and math.abs((hitZ or 0.0) - (l.z or 0.0)) <= 1.5 then
+            if pointInOrientedBox(hitX, hitY, l.x or 0.0, l.y or 0.0,
+                l.w or 0.0, l.sizeX, l.sizeY) then
+                local dx = (hitX - l.x); local dy = (hitY - l.y)
+                local d2 = dx * dx + dy * dy
+                if d2 < bestD2 then best, bestD2 = l, d2 end
+            end
+        end
+    end
+    return best
+end
+
+local function endOutputPicker(commit)
+    local p = OutputPicker
+    if not p then return end
+    OutputPicker = nil
+    SendNUIMessage({ action = "closeWorkerPickerHud" })
+    SetNuiFocus(false, false)
+    if commit and commit.lockerId then
+        TriggerServerEvent("pickle_drugs:setPlotOutput", p.plotId, commit.lockerId)
+    end
+end
+
+--- Start the output-destination picker for a plot.
+--- `currentLockerId` (optional) is rendered in white as the existing
+--- selection so the player sees their current binding.
+local function startOutputPicker(plotId, houseId, currentLockerId)
+    if OutputPicker or not plotId or not houseId then return end
+    local h = Houses[houseId]
+    local interior = h and Interiors[h.interior_id]
+    if not interior or not interior.zones or #interior.zones == 0 then return end
+
+    local detail = lib.callback.await("pickle_drugs:getHouseDetail", false, houseId) or {}
+
+    -- Per-zone cell sizes for box dimensions.
+    local zoneCellById = {}
+    for _, z in ipairs(interior.zones) do zoneCellById[z.id] = z.cell or 0.5 end
+
+    local lockers = {}
+    for _, l in ipairs(detail.lockers or {}) do
+        local cell = zoneCellById[l.zone_id] or 0.5
+        local cw = math.max(1, tonumber(l.cell_w) or 1)
+        local ch = math.max(1, tonumber(l.cell_h) or 1)
+        lockers[#lockers + 1] = {
+            id    = l.id,
+            kind  = l.kind,
+            x     = l.coords_x or 0.0,
+            y     = l.coords_y or 0.0,
+            z     = l.coords_z or 0.0,
+            w     = l.coords_w or 0.0,
+            sizeX = cw * cell,
+            sizeY = ch * cell,
+        }
+    end
+    if #lockers == 0 then
+        lib.notify({
+            title = "Output destination",
+            description = "No storage lockers in this property.",
+            type = "error",
+        })
+        return
+    end
+
+    OutputPicker = {
+        plotId          = plotId,
+        houseId         = houseId,
+        currentLockerId = currentLockerId,
+        lockers         = lockers,
+    }
+
+    -- Drop NUI focus so the gameplay cam takes input. The plant scene
+    -- already closed before this fires.
+    SetNuiFocus(false, false)
+    SendNUIMessage({
+        action = "openWorkerPickerHud",
+        data = {
+            slotsUsed = 0,
+            slotsMax  = 1,
+            available = #lockers,
+        },
+    })
+
+    CreateThread(function()
+        local enteredAt = GetGameTimer()
+        local cfg = Config.Housing.placement
+        local validColor   = cfg.validColor   or { r = 80,  g = 200, b = 120 }
+        local currentColor = { r = 240, g = 240, b = 240 }
+        local neutralColor = { r = 180, g = 180, b = 200 }
+
+        while OutputPicker do
+            Wait(0)
+            local p = OutputPicker
+            if not p then break end
+
+            -- Only the valid pick targets (lockers) are drawn — no full
+            -- zone carpet, so the world reads as "aim at one of these".
+            -- Selected locker (white) + all other lockers (neutral).
+            for _, l in ipairs(p.lockers) do
+                local isCurrent = l.id == p.currentLockerId
+                drawOutlineBox(l.x, l.y, l.z, l.w or 0.0, l.sizeX, l.sizeY,
+                    isCurrent and currentColor or neutralColor, 160)
+            end
+
+            local hover = nil
+            local hit = raycastFromCamera(60.0)
+            if hit then
+                hover = lockerUnderRay(p.lockers, hit.x, hit.y, hit.z)
+                if hover then
+                    drawOutlineBox(hover.x, hover.y, hover.z, hover.w or 0.0,
+                        hover.sizeX, hover.sizeY, validColor, 220)
+                else
+                    local cell = (Config.Housing and Config.Housing.gridCellSize) or 0.5
+                    local camRot = GetGameplayCamRot(2)
+                    local camYaw = (camRot and camRot.z) or 0.0
+                    drawOutlineBox(hit.x, hit.y, hit.z, camYaw, cell, cell,
+                        { r = 200, g = 200, b = 200 }, 120)
+                end
+            end
+
+            DisableControlAction(0, 38,  true)
+            DisableControlAction(0, 24,  true)
+            DisableControlAction(0, 25,  true)
+            DisableControlAction(0, 199, true)
+            DisableControlAction(0, 200, true)
+            DisableControlAction(0, 322, true)
+            if IsPauseMenuActive() then
+                SetFrontendActive(false)
+                ActivateFrontendMenu(`FE_MENU_VERSION_EMPTY_NO_BACKGROUND`, true, -1)
+            end
+
+            local pastBuffer = (GetGameTimer() - enteredAt) > 200
+
+            if pastBuffer and hover and (
+                IsDisabledControlJustPressed(0, 38)
+                or IsDisabledControlJustPressed(0, 24)
+            ) then
+                endOutputPicker({ lockerId = hover.id })
+                return
+            end
+
+            if pastBuffer and (
+                IsDisabledControlJustReleased(0, 199)
+                or IsDisabledControlJustReleased(0, 200)
+                or IsDisabledControlJustReleased(0, 322)
+            ) then
+                endOutputPicker(nil)
+                return
+            end
+        end
+    end)
+end
+
+RegisterNetEvent("pickle_drugs:openOutputPickerInScene", function(plotId, houseId, currentLockerId)
+    startOutputPicker(plotId, houseId, currentLockerId)
 end)
 
 --- Reusable plot mover. Used by both the manage panel ("Move" button on
@@ -999,10 +1555,11 @@ function Housing.MovePlot(plotId, houseId)
     local interior = h and Interiors[h.interior_id]
     if not interior or not interior.zones or #interior.zones == 0 then return end
 
+    -- Hide the manage panel for the duration of the move; restoreManage
+    -- is queued as a one-shot so it pops back on confirm or cancel.
     if ManageOpen then
-        SetNuiFocus(false, false)
-        SendNUIMessage({ action = "closeHouseManage" })
-        ManageOpen = false
+        minimizeManage()
+        Housing.OnNextPlacementEnd(restoreManage)
     end
 
     local detail = lib.callback.await("pickle_drugs:getHouseDetail", false, houseId) or {}
@@ -1097,9 +1654,10 @@ RegisterNUICallback("houseStartStorage", function(data, cb)
     local kindCfg = Config.Storage and Config.Storage.types and Config.Storage.types[data.kind]
     if not kindCfg or not kindCfg.model then return end
 
-    SetNuiFocus(false, false)
-    SendNUIMessage({ action = "closeHouseManage" })
-    ManageOpen = false
+    if ManageOpen then
+        minimizeManage()
+        Housing.OnNextPlacementEnd(restoreManage)
+    end
 
     -- Build collision list = plots + lockers in this house.
     local detail = lib.callback.await("pickle_drugs:getHouseDetail", false, data.houseId) or {}
@@ -1130,7 +1688,15 @@ end)
 RegisterNUICallback("houseStartMoveStorage", function(data, cb)
     cb({ ok = true })
     if not data or not data.lockerId then return end
-    if Storage and Storage.MoveLocker then Storage.MoveLocker(data.lockerId) end
+    if not (Storage and Storage.MoveLocker) then return end
+    -- Storage.MoveLocker drives Housing.StartPlacement under the hood;
+    -- queue the restore via the placement-end hook so the manage panel
+    -- comes back when the move finishes.
+    if ManageOpen then
+        minimizeManage()
+        Housing.OnNextPlacementEnd(restoreManage)
+    end
+    Storage.MoveLocker(data.lockerId)
 end)
 
 --- Inventory-driven placement entry. Triggered when the player "uses" a
@@ -1210,10 +1776,11 @@ RegisterNUICallback("houseStartPlacement", function(data, cb)
     local interior = h and Interiors[h.interior_id]
     if not interior or not interior.zones or #interior.zones == 0 then return end
 
-    -- Hide the manage panel during placement.
-    SetNuiFocus(false, false)
-    SendNUIMessage({ action = "closeHouseManage" })
-    ManageOpen = false
+    -- Hide the manage panel during placement; restore on confirm / cancel.
+    if ManageOpen then
+        minimizeManage()
+        Housing.OnNextPlacementEnd(restoreManage)
+    end
 
     -- The plot's persistent base prop is the soil pot; show that during
     -- placement so the preview matches what the player actually gets.

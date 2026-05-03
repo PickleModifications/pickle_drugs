@@ -14,14 +14,6 @@ RegisterCommand("drugs", function(source)
     TriggerClientEvent("pickle_drugs:openHousing", source, "houses")
 end, false)
 
--- NPC Employee manager. Admin-only. Opens the roster UI where admins
--- create / move / delete persistent worker peds. Plot assignment runs
--- through ox_target on the ped itself.
-RegisterCommand("employees", function(source)
-    if Admin and Admin.IsAdmin and not Admin.IsAdmin(source) then return end
-    TriggerClientEvent("pickle_drugs:openEmployees", source)
-end, false)
-
 -- ─── Entity broadcast helpers ─────────────────────────────────────────────
 -- Per-kind modules (grow, storage) call PickleEntity.Broadcast to push every
 -- change through the unified rendering channel — additive to their own

@@ -936,6 +936,8 @@ lib.callback.register("pickle_drugs:getHouseDetail", function(src, houseId)
                 house_id = l.house_id, zone_id = l.zone_id,
                 cell_x = l.cell_x, cell_y = l.cell_y,
                 cell_w = l.cell_w, cell_h = l.cell_h,
+                coords_x = l.coords_x, coords_y = l.coords_y,
+                coords_z = l.coords_z, coords_w = l.coords_w,
                 slots  = (Storage.SlotsFor and Storage.SlotsFor(l.kind)) or 0,
             }
         end

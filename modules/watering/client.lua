@@ -12,8 +12,9 @@ local WaterState = nil
 --- pitcher is moved each frame by SetEntityCoordsNoOffset, the liquid
 --- shifts via SetAttachedEntityOffset-equivalent (re-attach with new local
 --- offsets on each level change).
-local function SpawnPitcher(drugCfg, anchor)
-    local pitcherHash = LoadModel(drugCfg.watering.pitcher)
+local function SpawnPitcher(_drugCfg, anchor)
+    local cfg = (Config.PlantScene and Config.PlantScene.watering) or {}
+    local pitcherHash = LoadModel(cfg.pitcher)
     if not pitcherHash then return nil end
     local pitcher = CreateObject(pitcherHash, anchor.x, anchor.y, anchor.z, false, false, false)
     SetEntityCollision(pitcher, false, false)
@@ -21,8 +22,8 @@ local function SpawnPitcher(drugCfg, anchor)
     SetModelAsNoLongerNeeded(pitcherHash)
 
     local liquidEnt
-    if drugCfg.watering.liquid then
-        local liquidHash = LoadModel(drugCfg.watering.liquid)
+    if cfg.liquid then
+        local liquidHash = LoadModel(cfg.liquid)
         if liquidHash then
             liquidEnt = CreateObject(liquidHash, anchor.x, anchor.y, anchor.z, false, false, false)
             SetEntityCollision(liquidEnt, false, false)
@@ -30,7 +31,7 @@ local function SpawnPitcher(drugCfg, anchor)
             -- in so 100% sits at the rim. We slide it down on Z as the level
             -- drops (re-attach with a new offset).
             AttachEntityToEntity(liquidEnt, pitcher, 0,
-                0.0, 0.0, drugCfg.watering.liquidMaxZ or 0.0,
+                0.0, 0.0, cfg.liquidMaxZ or 0.0,
                 0.0, 0.0, 0.0,
                 false, false, false, false, 2, true)
             SetModelAsNoLongerNeeded(liquidHash)
@@ -42,10 +43,11 @@ end
 
 --- Re-attaches the liquid with a new Z offset. Cheaper than animating since
 --- the liquid is just a hollow shape sliding inside the pitcher.
-local function SetLiquidLevel(pitcher, liquid, drugCfg, level01)
+local function SetLiquidLevel(pitcher, liquid, _drugCfg, level01)
     if not liquid or not DoesEntityExist(liquid) then return end
-    local hi = drugCfg.watering.liquidMaxZ or 0.0
-    local lo = drugCfg.watering.liquidMinZ or -0.18
+    local cfg = (Config.PlantScene and Config.PlantScene.watering) or {}
+    local hi = cfg.liquidMaxZ or 0.0
+    local lo = cfg.liquidMinZ or -0.18
     local z  = lo + (hi - lo) * math.max(0.0, math.min(1.0, level01))
     AttachEntityToEntity(liquid, pitcher, 0,
         0.0, 0.0, z,
@@ -53,25 +55,27 @@ local function SetLiquidLevel(pitcher, liquid, drugCfg, level01)
         false, false, false, false, 2, true)
 end
 
-function GetWateringCamPreset(spot, drugCfg)
-    local cfg = drugCfg.watering
+function GetWateringCamPreset(spot, _drugCfg)
+    local sceneCfg = (Config.PlantScene and Config.PlantScene.watering) or {}
+    local cam = sceneCfg.camera or {}
+    local fov = cam.fov or 38.0
     local potHash = joaat("pickle_pot_01")
     local pMin, pMax = GetModelDimensions(potHash)
     local size = math.max(pMax.x - pMin.x, pMax.y - pMin.y, pMax.z - pMin.z, 0.6)
-    local fov  = 38.0
     local center  = vector3(spot.coords.x, spot.coords.y, spot.coords.z)
     local heading = spot.coords.w or 0.0
     local aimZ = center.z + (pMin.z + pMax.z) * 0.5 + 0.4
-    local distance = (size * 0.5) / math.tan(math.rad(fov) * 0.5) * (cfg.cameraDistMul or 1.4)
+    local distance = (size * 0.5) / math.tan(math.rad(fov) * 0.5) * (cam.distanceMul or 1.4)
 
     local rad = math.rad(heading)
     local camX = center.x + math.sin(rad) * distance
     local camY = center.y - math.cos(rad) * distance
-    local camZ = aimZ + 0.6
+    local camZ = aimZ + (cam.heightOffset or 0.6)
+    local lookZ = aimZ + (cam.lookOffset or 0.0)
 
     return {
         coords = vector3(camX, camY, camZ),
-        point  = vector3(center.x, center.y, aimZ),
+        point  = vector3(center.x, center.y, lookZ),
         fov    = fov,
     }
 end
@@ -182,14 +186,15 @@ local function CamForwardYawDeg()
 end
 
 local function StartPotFx(potEnt)
-    local fxDict = WaterState.drugCfg.watering.potFx and WaterState.drugCfg.watering.potFx.dict
-    local fxName = WaterState.drugCfg.watering.potFx and WaterState.drugCfg.watering.potFx.name
+    local cfg = (Config.PlantScene and Config.PlantScene.watering) or {}
+    local fxDict = cfg.potFx and cfg.potFx.dict
+    local fxName = cfg.potFx and cfg.potFx.name
     if not fxDict or not fxName or not potEnt or WaterState.potPtfx then return end
     if not HasNamedPtfxAssetLoaded(fxDict) then return end
     UseParticleFxAssetNextCall(fxDict)
     -- Emit at the pot's soil surface so the splash/fill reads on top of
     -- the soil rather than under it. The Z offset is configurable.
-    local zOff = WaterState.drugCfg.watering.potFxZ or 0.25
+    local zOff = cfg.potFxZ or 0.25
     WaterState.potPtfx = StartParticleFxLoopedOnEntity(
         fxName, potEnt,
         0.0, 0.0, zOff,
@@ -208,15 +213,16 @@ end
 --- Each frame: read NUI cursor, drive the pitcher pose, run pour logic.
 local function RunWateringThread()
     CreateThread(function()
-        local pourAngle = WaterState.drugCfg.watering.pourAngleDeg or 65.0
+        local cfg = (Config.PlantScene and Config.PlantScene.watering) or {}
+        local pourAngle = cfg.pourAngleDeg or 65.0
         -- Derive pour rate from the configured "seconds per full pitcher"
         -- so a 4-second value drains 100% in exactly 4 seconds of pouring.
-        local pourSeconds = WaterState.drugCfg.watering.secondsPerFullPitcher or 4.0
+        local pourSeconds = cfg.secondsPerFullPitcher or 4.0
         local pourPerSec = (pourSeconds > 0) and (1.0 / pourSeconds) or 0.25
-        local pourPerPlot = WaterState.drugCfg.watering.pourPerPlot or 0.20
-        local fxDict = WaterState.drugCfg.watering.partFx and WaterState.drugCfg.watering.partFx.dict
-        local fxName = WaterState.drugCfg.watering.partFx and WaterState.drugCfg.watering.partFx.name
-        local potFxDict = WaterState.drugCfg.watering.potFx and WaterState.drugCfg.watering.potFx.dict
+        local pourPerPlot = cfg.pourPerPlot or 0.20
+        local fxDict = cfg.partFx and cfg.partFx.dict
+        local fxName = cfg.partFx and cfg.partFx.name
+        local potFxDict = cfg.potFx and cfg.potFx.dict
 
         if fxDict then
             RequestNamedPtfxAsset(fxDict)
@@ -347,7 +353,7 @@ function OpenWateringScene(plotId, opts)
     local spot = GetPlotSpot(plotId)
     if not plot or not spot then return end
     local drugCfg = Config.Drugs[plot.drug]
-    if not drugCfg or not drugCfg.watering then return end
+    if not drugCfg or not (Config.PlantScene and Config.PlantScene.watering) then return end
 
     -- Pre-flight item check now lives in plant_scene/client.lua's
     -- StartAction, gated on a server-side count callback; this scene

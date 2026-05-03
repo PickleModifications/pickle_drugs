@@ -228,12 +228,9 @@ RegisterCommand("budoffset", function()
     -- target. The scissors prop spawned by the cutting flow can be in the
     -- ped's hand and would otherwise block placement on the plant.
     local skipModels = {}
-    if drugCfg.cutting and drugCfg.cutting.tool then
-        skipModels[joaat(drugCfg.cutting.tool)] = true
-    end
-    if drugCfg.cutting and drugCfg.cutting.fallCarrier then
-        skipModels[joaat(drugCfg.cutting.fallCarrier)] = true
-    end
+    local cut = Config.PlantScene and Config.PlantScene.cutting
+    if cut and cut.tool then skipModels[joaat(cut.tool)] = true end
+    if cut and cut.fallCarrier then skipModels[joaat(cut.fallCarrier)] = true end
 
     Editor = {
         plotId        = plotId,

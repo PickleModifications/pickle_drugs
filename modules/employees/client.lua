@@ -49,21 +49,12 @@ local function attachTarget(ped, empId)
     if GetResourceState("ox_target") ~= "started" then return end
     exports.ox_target:addLocalEntity(ped, {
         {
-            name  = "pickle_drugs:emp_assign_" .. empId,
-            label = "Assign Plots",
-            icon  = "fa-solid fa-list-check",
-            distance = 2.5,
-            onSelect = function()
-                TriggerEvent("pickle_drugs:openAssigner", empId)
-            end,
-        },
-        {
             name  = "pickle_drugs:emp_manage_" .. empId,
-            label = "Manage Employee",
+            label = "Manage Worker",
             icon  = "fa-solid fa-id-badge",
             distance = 2.5,
             onSelect = function()
-                TriggerEvent("pickle_drugs:openEmployeeInfo", empId)
+                TriggerEvent("pickle_drugs:openWorkerInManagePanel", empId)
             end,
         },
     })
@@ -435,7 +426,7 @@ function GetAllLocalEmployees()
     return out
 end
 
--- ─── NUI surfaces ──────────────────────────────────────────────────────────
+-- ─── Ped models (consumed by HouseManagePanel hire UI) ───────────────────
 
 local PED_MODELS = {
     "a_m_m_business_01",
@@ -449,191 +440,3 @@ local PED_MODELS = {
 }
 Employees = Employees or {}
 Employees.PedModels = PED_MODELS
-
-local FIRST_NAMES = {
-    "Alex", "Jamie", "Riley", "Sam", "Taylor", "Casey", "Jordan", "Drew",
-    "Pat", "Morgan", "Reese", "Quinn", "Avery", "Logan", "Blake", "Cameron",
-}
-local LAST_NAMES = {
-    "Reed", "Cole", "Vance", "Hayes", "Doyle", "Marsh", "Cross", "Lane",
-    "Fox", "Burke", "Ellis", "Pace", "Wells", "Kemp", "Ross", "Sutton",
-}
-
-local function pickRandom(t)
-    return t[math.random(1, #t)]
-end
-
-local creatorOpen = false
-local creatorActiveModel = PED_MODELS[1]
-
-local function listEmployees()
-    return lib.callback.await("pickle_drugs:listEmployees", false) or {}
-end
-
-local function pushEmployeesList()
-    SendNUIMessage({
-        action = "employeesList",
-        data   = { employees = listEmployees() },
-    })
-end
-
-local function openEmployeesPanel()
-    if creatorOpen then return end
-    creatorOpen = true
-    local employees = listEmployees()
-    SetNuiFocus(true, true)
-    SendNUIMessage({
-        action = "openEmployees",
-        data   = {
-            models    = PED_MODELS,
-            employees = employees,
-        },
-    })
-end
-
-local function closeEmployeesPanel()
-    if not creatorOpen then return end
-    creatorOpen = false
-    SetNuiFocus(false, false)
-    SendNUIMessage({ action = "closeEmployees" })
-end
-
-local function minimizeForGizmo()
-    SetNuiFocus(false, false)
-    SendNUIMessage({ action = "employeesMinimize" })
-end
-
-local function restoreFromGizmo()
-    if not creatorOpen then return end
-    SetNuiFocus(true, true)
-    SendNUIMessage({
-        action = "employeesRestore",
-        data   = { employees = listEmployees() },
-    })
-end
-
-RegisterNetEvent("pickle_drugs:openEmployees", function()
-    openEmployeesPanel()
-end)
-
--- Refresh the open list whenever the server pushes a roster change.
-RegisterNetEvent("pickle_drugs:employeeUpdate", function()
-    if creatorOpen then pushEmployeesList() end
-end)
-RegisterNetEvent("pickle_drugs:employeeRemoved", function()
-    if creatorOpen then pushEmployeesList() end
-end)
-
--- ─── NUI callbacks (employees panel) ──────────────────────────────────────
--- The admin panel is read-only now: workers are created via the house
--- "Hire" flow, moved by re-binding to a different house, and dismissed
--- via the same panel. The /employees command stays for plot assignment.
-
-RegisterNUICallback("employeesClose", function(_, cb)
-    closeEmployeesPanel()
-    cb({ ok = true })
-end)
-
-RegisterNUICallback("employeesAssign", function(data, cb)
-    cb({ ok = true })
-    if data and data.empId then
-        closeEmployeesPanel()
-        if Employees and Employees.OpenAssigner then
-            Employees.OpenAssigner(data.empId)
-        end
-    end
-end)
-
--- ─── Plot assigner ────────────────────────────────────────────────────────
-
-local assignerOpen = false
-local assignerEmpId = nil
-
-local function openAssigner(empId)
-    if assignerOpen then return end
-    local plots = lib.callback.await("pickle_drugs:getAssignablePlots", false, empId) or {}
-    local emp
-    for _, e in ipairs(listEmployees()) do
-        if e.id == empId then emp = e break end
-    end
-    if not emp then return end
-    assignerOpen = true
-    assignerEmpId = empId
-    SetNuiFocus(true, true)
-    SendNUIMessage({
-        action = "openAssigner",
-        data   = {
-            empId         = empId,
-            firstName     = emp.firstName,
-            lastName      = emp.lastName,
-            plots         = plots,
-            assignedPlots = emp.assignedPlots or {},
-        },
-    })
-end
-
-local function closeAssigner()
-    if not assignerOpen then return end
-    assignerOpen = false
-    assignerEmpId = nil
-    SetNuiFocus(false, false)
-    SendNUIMessage({ action = "closeAssigner" })
-end
-
-RegisterNetEvent("pickle_drugs:openAssigner", function(empId)
-    openAssigner(empId)
-end)
-
---- Public entry point so other modules (e.g. the house management panel)
---- can invoke the same assigner UI without going through the admin
---- /employees command. Server still gates `pickle_drugs:assignPlots` on
---- admin-or-house-owner authorisation.
-function Employees.OpenAssigner(empId) openAssigner(empId) end
-
-RegisterNUICallback("assignerClose", function(_, cb)
-    closeAssigner()
-    cb({ ok = true })
-end)
-
-RegisterNUICallback("assignerSave", function(data, cb)
-    if data and data.empId and type(data.plotIds) == "table" then
-        TriggerServerEvent("pickle_drugs:assignPlots", data.empId, data.plotIds)
-    end
-    closeAssigner()
-    cb({ ok = true })
-end)
-
--- ─── Manage info popup ────────────────────────────────────────────────────
-
-local infoOpen = false
-
-local function openEmployeeInfo(empId)
-    if infoOpen then return end
-    local emp
-    for _, e in ipairs(listEmployees()) do
-        if e.id == empId then emp = e break end
-    end
-    if not emp then return end
-    infoOpen = true
-    SetNuiFocus(true, true)
-    SendNUIMessage({
-        action = "openEmployeeInfo",
-        data   = { employee = emp },
-    })
-end
-
-local function closeEmployeeInfo()
-    if not infoOpen then return end
-    infoOpen = false
-    SetNuiFocus(false, false)
-    SendNUIMessage({ action = "closeEmployeeInfo" })
-end
-
-RegisterNetEvent("pickle_drugs:openEmployeeInfo", function(empId)
-    openEmployeeInfo(empId)
-end)
-
-RegisterNUICallback("employeeInfoClose", function(_, cb)
-    closeEmployeeInfo()
-    cb({ ok = true })
-end)

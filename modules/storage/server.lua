@@ -418,7 +418,21 @@ snapshot = function(src, l)
     }
 end
 
+--- Strip the `dealer:` prefix from an id and return (true, slotId) when
+--- it's a dealer storage virtual locker. Otherwise returns (false, id).
+local function asDealerId(id)
+    if type(id) == "string" and id:sub(1, 7) == "dealer:" then
+        return true, id:sub(8)
+    end
+    return false, id
+end
+
 lib.callback.register("pickle_drugs:openStorage", function(src, lockerId)
+    local isDealer, slotId = asDealerId(lockerId)
+    if isDealer then
+        if not (Dealers and Dealers.OpenAsLocker) then return nil end
+        return Dealers.OpenAsLocker(src, slotId)
+    end
     local l = Lockers[lockerId]
     if not l then return nil end
     if not ensureCanAccess(src, l) then return nil end
@@ -432,6 +446,11 @@ end)
 
 RegisterNetEvent("pickle_drugs:closeStorage", function(lockerId)
     local src = source
+    local isDealer, slotId = asDealerId(lockerId)
+    if isDealer then
+        if Dealers and Dealers.CloseAsLocker then Dealers.CloseAsLocker(src, slotId) end
+        return
+    end
     if Openers[lockerId] == src then
         Openers[lockerId] = nil
         PlayerLocker[src] = nil
@@ -452,6 +471,13 @@ RegisterNetEvent("pickle_drugs:storageTransfer", function(payload)
     local src = source
     if type(payload) ~= "table" then return end
     local lockerId = payload.lockerId
+    local isDealer, slotId = asDealerId(lockerId)
+    if isDealer then
+        if Dealers and Dealers.HandleTransfer then
+            Dealers.HandleTransfer(src, slotId, payload)
+        end
+        return
+    end
     local l = Lockers[lockerId]
     if not l or Openers[lockerId] ~= src then return end
     if not ensureCanAccess(src, l) then return end
@@ -463,7 +489,16 @@ RegisterNetEvent("pickle_drugs:storageTransfer", function(payload)
 
     -- Deep-equal compare for item metadata. Two stacks merge only when
     -- both name and metadata match — different metadata = different stack.
+    -- nil and an empty table are treated as equivalent so a worker-deposited
+    -- stack (metadata = nil) can merge with a player-deposited one
+    -- (ox_inventory returns metadata = {} for plain items).
+    local function isEmptyMeta(t)
+        if t == nil then return true end
+        if type(t) ~= "table" then return false end
+        return next(t) == nil
+    end
     local function metaEq(a, b)
+        if isEmptyMeta(a) and isEmptyMeta(b) then return true end
         if a == b then return true end
         local ta, tb = type(a), type(b)
         if ta ~= tb then return false end
@@ -581,15 +616,36 @@ RegisterNetEvent("pickle_drugs:storageTransfer", function(payload)
         local a = getSlot(fromSlot)
         if not a then return end
         local b = getSlot(toSlot)
-        -- Same-item drop = merge stacks rather than swap. Lets the user
-        -- consolidate piles by dragging onto an existing pile.
-        if b and b.name == a.name and metaEq(b.metadata, a.metadata) then
-            b.count = (tonumber(b.count) or 0) + (tonumber(a.count) or 0)
-            setSlot(toSlot, b)
-            setSlot(fromSlot, nil)
+        local stack = tonumber(a.count) or 0
+        -- Partial split / merge: when the client sends a count smaller than
+        -- the source stack we move only that many. A partial drop onto a
+        -- different-item slot is a no-op (can't swap part of a stack).
+        local count = tonumber(reqCount)
+        if not count or count >= stack then count = stack end
+        if count < 1 then return end
+        local sameItem = b and b.name == a.name and metaEq(b.metadata, a.metadata)
+
+        if count < stack then
+            if b and not sameItem then
+                -- Different item under the cursor — can't accept a partial.
+                pushSnapshot(src, l)
+                return
+            end
+            local newB = sameItem and b or { name = a.name, count = 0, metadata = a.metadata }
+            newB.count = (tonumber(newB.count) or 0) + count
+            setSlot(toSlot, newB)
+            a.count = stack - count
+            setSlot(fromSlot, a)
         else
-            setSlot(fromSlot, b)
-            setSlot(toSlot, a)
+            -- Full-stack move: same-item → merge, else swap.
+            if sameItem then
+                b.count = (tonumber(b.count) or 0) + count
+                setSlot(toSlot, b)
+                setSlot(fromSlot, nil)
+            else
+                setSlot(fromSlot, b)
+                setSlot(toSlot, a)
+            end
         end
         persistItems(l)
         pushSnapshot(src, l)

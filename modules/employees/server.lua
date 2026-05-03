@@ -298,8 +298,10 @@ RegisterNetEvent("pickle_drugs:assignPlots", function(empId, plotIds)
     -- Validate each plot id exists, dedupe, scrub from other employees
     -- (strict 1:1 ownership), then assign to this one. House-owner callers
     -- are additionally restricted to plots belonging to the worker's house.
+    local maxPlots = (Config and Config.Employees and tonumber(Config.Employees.maxPlotsPerWorker)) or 10
     local seen, kept = {}, {}
     for _, pid in ipairs(plotIds) do
+        if #kept >= maxPlots then break end
         if type(pid) == "string" and not seen[pid] then
             local plot = Grow.GetServerPlot(pid)
             if plot then
@@ -315,10 +317,23 @@ RegisterNetEvent("pickle_drugs:assignPlots", function(empId, plotIds)
     end
     emp.assigned_plots = kept
     SyncEmployee(emp)
-    -- Reset to idle so the next scheduler tick re-evaluates against the
-    -- new pool instead of waiting for the in-flight task to finish.
-    EmployeeState[empId] = { state = "idle", cooldownUntil = 0 }
-    broadcastTask(emp, makeIdleTask(emp))
+    -- Don't interrupt an in-flight task just because the assignment list
+    -- changed — the next scheduler tick after the current task completes
+    -- will pick from the updated pool naturally. Only force-idle the
+    -- worker if their current plot was removed from the pool, otherwise
+    -- they'd be left mid-walk to a plot they no longer own.
+    local s = EmployeeState[empId]
+    local cur = s and s.currentPlotId or nil
+    local stillAssigned = false
+    if cur then
+        for _, pid in ipairs(kept) do
+            if pid == cur then stillAssigned = true break end
+        end
+    end
+    if cur and not stillAssigned then
+        EmployeeState[empId] = { state = "idle", cooldownUntil = 0 }
+        broadcastTask(emp, makeIdleTask(emp))
+    end
     notify(src, ("Assigned %d plot(s)"):format(#kept), "success")
 end)
 
@@ -356,21 +371,56 @@ end)
 --- assignment NUI uses this to grey out plots taken by other employees
 --- while keeping the queried employee's own plots checked.
 lib.callback.register("pickle_drugs:getAssignablePlots", function(_src, queryEmpId)
+    -- House-bound employees only see plots inside their house. Scoping
+    -- here keeps the per-house manage panel from leaking other properties
+    -- and lets the in-world picker render only the relevant boxes.
+    local queryEmp = queryEmpId and Roster[queryEmpId] or nil
+    local scopedHouseId = queryEmp and queryEmp.house_id or nil
+
+    -- Look up cell sizes per zone via the housing module so the picker can
+    -- render footprint boxes without a second callback round-trip.
+    local zoneCellById = {}
+    if Housing and Housing.GetHouse and Housing.GetInterior then
+        local seenInteriors = {}
+        for _, plot in pairs(Grow.GetAllServerPlots() or {}) do
+            local houseId = plot.house_id
+            if houseId and not seenInteriors[houseId] then
+                local h = Housing.GetHouse(houseId)
+                local interior = h and Housing.GetInterior(h.interior_id)
+                if interior and interior.zones then
+                    for _, z in ipairs(interior.zones) do
+                        zoneCellById[z.id] = z.cell or 0.5
+                    end
+                end
+                seenInteriors[houseId] = true
+            end
+        end
+    end
+
     local out = {}
     for id, plot in pairs(Grow.GetAllServerPlots() or {}) do
-        local owner = plotOwnerOf(id)
-        out[#out + 1] = {
-            id        = id,
-            drug      = plot.drug,
-            stage     = plot.stage,
-            x         = plot.coords_x,
-            y         = plot.coords_y,
-            z         = plot.coords_z,
-            w         = plot.coords_w,
-            ownerEmpId = owner and owner.id or nil,
-            ownerName  = owner and (owner.first_name .. " " .. owner.last_name) or nil,
-            ownedByMe  = owner and owner.id == queryEmpId or false,
-        }
+        if not scopedHouseId or plot.house_id == scopedHouseId then
+            local owner = plotOwnerOf(id)
+            local cell = zoneCellById[plot.zone_id] or 0.5
+            local cw = tonumber(plot.cell_w) or 1
+            local ch = tonumber(plot.cell_h) or 1
+            out[#out + 1] = {
+                id        = id,
+                drug      = plot.drug,
+                stage     = plot.stage,
+                x         = plot.coords_x,
+                y         = plot.coords_y,
+                z         = plot.coords_z,
+                w         = plot.coords_w,
+                houseId   = plot.house_id,
+                zoneId    = plot.zone_id,
+                sizeX     = cw * cell,
+                sizeY     = ch * cell,
+                ownerEmpId = owner and owner.id or nil,
+                ownerName  = owner and (owner.first_name .. " " .. owner.last_name) or nil,
+                ownedByMe  = owner and owner.id == queryEmpId or false,
+            }
+        end
     end
     table.sort(out, function(a, b) return a.id < b.id end)
     return out
@@ -528,13 +578,12 @@ local function performAction(emp, plotId, action, budIndex)
     if ok then
         Grow.SyncServerPlot(plot, true)
         -- Harvest routes the bud into the worker's carry-bag instead of
-        -- giving it to the player. Drug definitions name the harvest item
-        -- on `cutting.harvestItem`. Plots tagged with an output_locker_id
+        -- giving it to the player. Plots tagged with an output_locker_id
         -- get bucketed under that locker so the deposit cycle knows where
         -- to dump. Plots without a destination accumulate under the
         -- "_unrouted" bucket and stay with the worker.
         if action == "harvest" then
-            local item = drugCfg.cutting and drugCfg.cutting.harvestItem
+            local item = drugCfg.harvestItem
             if item then
                 Employees.AddToCarry(emp, item, 1, plot.output_locker_id)
                 SyncEmployee(emp)
@@ -1076,6 +1125,7 @@ lib.callback.register("pickle_drugs:listHouseEmployees", function(_src, houseId)
                 carry = emp.carry or {},
                 carryTotal = totalCarry(emp),
                 carryCap   = carryCapacity(),
+                assignedPlots = emp.assigned_plots or {},
             }
         end
     end

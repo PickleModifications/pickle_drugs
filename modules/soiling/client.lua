@@ -15,15 +15,18 @@
 
 local SoilState = nil
 
-local CAMERA_FOV         = 38.0
 local PLANT_BAG_REST_Z   = 0.5
+local CAMERA_FOV         = (Config.PlantScene and Config.PlantScene.soiling
+    and Config.PlantScene.soiling.camera and Config.PlantScene.soiling.camera.fov) or 38.0
 
 -- ─── Camera + helpers (mirrored from planting/watering) ────────────────────
 
-function GetSoilingCamPreset(spot, drugCfg)
+function GetSoilingCamPreset(spot, _drugCfg)
+    local sceneCfg = (Config.PlantScene and Config.PlantScene.soiling) or {}
+    local cam = sceneCfg.camera or {}
+    local fov = cam.fov or 38.0
     local potHash = joaat("pickle_pot_01")
     local pMin, pMax = GetModelDimensions(potHash)
-    local fov = CAMERA_FOV
     local center  = vector3(spot.coords.x, spot.coords.y, spot.coords.z)
     local heading = spot.coords.w or 0.0
 
@@ -36,17 +39,17 @@ function GetSoilingCamPreset(spot, drugCfg)
     local aspect = GetAspectRatio(false) or 1.777
     local fitH = (sceneH * 0.5) / math.tan(math.rad(fov) * 0.5)
     local fitW = (sceneW * 0.5) / math.tan(math.rad(fov) * 0.5) / aspect
-    local distance = math.max(fitH, fitW)
-        * ((drugCfg.soiling and drugCfg.soiling.cameraDistMul) or 1.4)
+    local distance = math.max(fitH, fitW) * (cam.distanceMul or 1.4)
 
     local rad = math.rad(heading)
     local camX = center.x + math.sin(rad) * distance
     local camY = center.y - math.cos(rad) * distance
-    local camZ = aimZ + 1.0
+    local camZ = aimZ + (cam.heightOffset or 1.0)
+    local lookZ = aimZ + (cam.lookOffset or 0.0)
 
     return {
         coords = vector3(camX, camY, camZ),
-        point  = vector3(center.x, center.y, aimZ),
+        point  = vector3(center.x, center.y, lookZ),
         fov    = fov,
     }
 end
@@ -152,9 +155,10 @@ end
 
 -- ─── Bag + soil prop spawning ──────────────────────────────────────────────
 
-local function SpawnBagPair(drugCfg, anchor)
-    local fullModel = drugCfg.soilBag and drugCfg.soilBag.full
-    local rippedModel = drugCfg.soilBag and drugCfg.soilBag.ripped
+local function SpawnBagPair(_drugCfg, anchor)
+    local bag = Config.PlantScene and Config.PlantScene.soiling and Config.PlantScene.soiling.bag
+    local fullModel = bag and bag.full
+    local rippedModel = bag and bag.ripped
     if not fullModel or not rippedModel then return nil, nil end
     local fullHash = LoadModel(fullModel)
     local rippedHash = LoadModel(rippedModel)
@@ -254,8 +258,8 @@ end
 
 local function RunSoilingThread()
     CreateThread(function()
-        local cfg = SoilState.drugCfg.soiling
-        local plantingCfg = SoilState.drugCfg.planting or {}
+        local cfg = (Config.PlantScene and Config.PlantScene.soiling) or {}
+        local plantingCfg = (Config.PlantScene and Config.PlantScene.planting) or {}
         local rotateSpeed = 90.0    -- deg/sec
         local pourAngle = cfg.pourAngleDeg or 60.0
         local fillPerSec = (cfg.secondsPerFullBag and cfg.secondsPerFullBag > 0)
@@ -382,7 +386,8 @@ function OpenSoilingScene(plotId, opts)
     local spot = GetPlotSpot(plotId)
     if not plot or not spot then return end
     local drugCfg = Config.Drugs[plot.drug]
-    if not drugCfg or not drugCfg.soiling or not drugCfg.soilBag then return end
+    local sceneCfg = Config.PlantScene and Config.PlantScene.soiling
+    if not drugCfg or not sceneCfg or not sceneCfg.bag then return end
     if (plot.soil_added_at or 0) ~= 0 then return end
 
     local center = vector3(spot.coords.x, spot.coords.y, spot.coords.z)
@@ -419,7 +424,7 @@ function OpenSoilingScene(plotId, opts)
     local bagScreenLeft, bagScreenRight = 0.4, 0.6
     local bagScreenTop, bagScreenBottom = 0.4, 0.6
     if fullBag then
-        local pMin, pMax = GetModelDimensions(joaat(drugCfg.soilBag.full))
+        local pMin, pMax = GetModelDimensions(joaat(sceneCfg.bag.full))
         local minX, maxX = math.huge, -math.huge
         local minY, maxY = math.huge, -math.huge
         for _, lx in ipairs({ pMin.x, pMax.x }) do
@@ -447,8 +452,7 @@ function OpenSoilingScene(plotId, opts)
 
     -- Scene-local soil that animates Z during the pour. It starts below the
     -- pot rim and rises to its resting position as fill goes 0→1.
-    local sceneSoil = SpawnSceneSoil(center,
-        (drugCfg.soiling.soilStartZ or -0.35))
+    local sceneSoil = SpawnSceneSoil(center, sceneCfg.soilStartZ or -0.35)
 
     SoilState = {
         plotId       = plotId,

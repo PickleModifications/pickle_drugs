@@ -84,36 +84,14 @@ local function syncBaseProps(s, plot, center, heading)
     end
 end
 
---- Adds/removes the capsule trio. With the interactive planting scene
---- enabled (drugCfg.planting set), capsule visuals are owned entirely by
---- modules/planting/client during the plant flow and are never drawn here
---- — the scene fires `pickle_drugs:plant` only after the seed has already
---- been "buried" client-side, so a static capsule on the soil afterwards
---- would be a duplicate.
-local function syncCapsule(s, plot, drugCfg, center, heading)
-    if drugCfg.planting then
-        -- Drop any capsule entities lingering from a pre-planting-scene
-        -- save and never spawn them.
-        for _, e in pairs(s.entities.capsule) do
-            if e and DoesEntityExist(e) then DeleteEntity(e) end
-        end
-        s.entities.capsule = {}
-        return
+--- The interactive planting scene owns the capsule visuals during the
+--- plant flow; this stub just drains any leftovers from a pre-planting-scene
+--- save so a static capsule never duplicates the in-scene one.
+local function syncCapsule(s, _plot, _drugCfg, _center, _heading)
+    for _, e in pairs(s.entities.capsule) do
+        if e and DoesEntityExist(e) then DeleteEntity(e) end
     end
-
-    local need = plot.stage == 1 and (plot.stage_started_at or 0) > 0 and drugCfg.capsule
-    local have = s.entities.capsule.capsule and DoesEntityExist(s.entities.capsule.capsule)
-    if need and not have then
-        local c = drugCfg.capsule
-        s.entities.capsule.capsule = SpawnWorldProp(c.capsule, center, heading)
-        s.entities.capsule.cap     = SpawnWorldProp(c.cap, center, heading)
-        s.entities.capsule.seed    = SpawnWorldProp(c.seed, center, heading)
-    elseif not need and have then
-        for _, e in pairs(s.entities.capsule) do
-            if e and DoesEntityExist(e) then DeleteEntity(e) end
-        end
-        s.entities.capsule = {}
-    end
+    s.entities.capsule = {}
 end
 
 --- Soil rubble pile. Spawned once the plot is planted (stage_started_at >
@@ -122,10 +100,10 @@ end
 --- angular spacing, same residual radius (5% of the spawn radius after
 --- the planting animation closes to 95%) — so the persistent pile reads
 --- identical to what the player just clicked into place.
-local function syncRubble(s, plot, drugCfg, center, _heading)
+local function syncRubble(s, plot, _drugCfg, center, _heading)
     s.entities.rubble = s.entities.rubble or {}
-    local cfg  = drugCfg.planting
-    local need = cfg and cfg.rubble and (plot.stage_started_at or 0) > 0
+    local cfg  = (Config.PlantScene and Config.PlantScene.planting) or {}
+    local need = cfg.rubble and (plot.stage_started_at or 0) > 0
     local count = (cfg and cfg.rubbleCount) or 4
     local zOff = (cfg and cfg.rubbleSoilZ) or 0.0
 
@@ -483,17 +461,21 @@ local function WaitForAllDrugModels()
     -- Generic shared props every drug spawns.
     add("pickle_pot_01"); add("pickle_soil_01")
 
-    -- Per-drug models.
+    -- Scene-wide props (capsule trio, soil bag pair, rubble).
+    local ps = Config.PlantScene or {}
+    if ps.planting and ps.planting.capsule then
+        add(ps.planting.capsule.capsule)
+        add(ps.planting.capsule.cap)
+        add(ps.planting.capsule.seed)
+    end
+    if ps.planting and ps.planting.rubble then add(ps.planting.rubble) end
+    if ps.soiling and ps.soiling.bag then
+        add(ps.soiling.bag.full)
+        add(ps.soiling.bag.ripped)
+    end
+
+    -- Per-drug stage models.
     for _, drugCfg in pairs(Config.Drugs or {}) do
-        if drugCfg.capsule then
-            add(drugCfg.capsule.capsule); add(drugCfg.capsule.cap); add(drugCfg.capsule.seed)
-        end
-        if drugCfg.planting and drugCfg.planting.rubble then
-            add(drugCfg.planting.rubble)
-        end
-        if drugCfg.soilBag then
-            add(drugCfg.soilBag.full); add(drugCfg.soilBag.ripped)
-        end
         for _, stage in pairs(drugCfg.stages or {}) do
             add(stage.model)
             if stage.buds then add(stage.buds.model) end

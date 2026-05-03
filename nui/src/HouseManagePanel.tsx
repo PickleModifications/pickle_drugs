@@ -1,34 +1,42 @@
 // Player-facing house management panel. Shown when the player interacts
 // with the world door ("Inspect Property") or the in-house management
-// ox_target. Surfaces buy/rent for unowned houses; for owned/rented
-// houses, shows pay-rent / cancel-lease, residents list, hire workers,
-// and "Place Entity" (initiates the grid-based placement flow).
+// ox_target. Bottom-anchored bar (Plant-Console style) with tabs so the
+// player can flip between Property / Access / Workers without
+// re-targeting the management point. A "Walk" toggle releases NUI focus
+// so the player can move around and inspect the house in-world; the
+// panel stays mounted (with reduced opacity) and resumes on ESC or
+// click.
+//
+// Plants and storage lockers are managed directly in-world via the
+// plot / locker ox_targets, not from this panel.
 
 import { useEffect, useState } from "react";
-import { Building, DollarSign, Users, X, Sprout, Hammer, Trash2, UserPlus, Move, ListChecks, Box } from "lucide-react";
+import {
+    Building, DollarSign, Users, X, Trash2,
+    UserPlus, ListChecks, Footprints, KeyRound, Home,
+    ArrowLeft, Plus, Sprout,
+} from "lucide-react";
 
 import { fetchNui, useNuiEvent } from "@/lib/nui";
-import type { House, Interior, Zone } from "./HousingPanel";
+import type { House, Interior } from "./HousingPanel";
 
-type Plot = {
+type AssignerPlot = {
     id: string;
     drug: string;
-    zone_id: string;
-    cell_x: number; cell_y: number; cell_w: number; cell_h: number;
-    output_locker_id?: string | null;
+    stage: number;
+    x: number; y: number; z: number; w: number;
+    ownerEmpId?: string;
+    ownerName?: string;
+    ownedByMe?: boolean;
 };
 
-type DrugOption = { id: string; label: string };
-
-type StorageTypeOption = { id: string; label: string; slots: number };
-
-type Locker = {
-    id: string;
-    kind: string;
-    house_id: string;
-    zone_id: string;
-    cell_x: number; cell_y: number; cell_w: number; cell_h: number;
-    slots: number;
+type AssignerState = {
+    empId: string;
+    firstName: string;
+    lastName: string;
+    plots: AssignerPlot[];
+    assignedPlots: string[];
+    maxPlots: number;
 };
 
 type HouseEmployee = {
@@ -41,6 +49,13 @@ type HouseEmployee = {
     carryTotal?: number;
     carryCap?: number;
 };
+
+// Kept on the data shape for compatibility with the Lua payload — the
+// panel just doesn't surface entities/lockers/drugs/storageTypes any more.
+type Plot = unknown;
+type Locker = unknown;
+type DrugOption = { id: string; label: string };
+type StorageTypeOption = { id: string; label: string; slots: number };
 
 export type HouseManageData = {
     house: House;
@@ -56,7 +71,10 @@ export type HouseManageData = {
     storageTypes?: StorageTypeOption[];
     employees: HouseEmployee[];
     pedModels: string[];
+    initialAssigner?: AssignerState | null;
 };
+
+type Tab = "property" | "access" | "workers";
 
 function fmtMoney(n: number) {
     return "$" + n.toLocaleString();
@@ -74,63 +92,66 @@ function fmtDue(at: number): string {
     return `${Math.max(1, Math.floor(s / 60))}m`;
 }
 
+function TabButton({
+    label, Icon, active, onClick,
+}: {
+    label: string; Icon: React.ElementType;
+    active: boolean; onClick: () => void;
+}) {
+    return (
+        <button
+            onClick={onClick}
+            disabled={active}
+            className={"px-3 py-1.5 rounded text-xs ring-1 transition-colors inline-flex items-center gap-1.5 " +
+                (active
+                    ? "bg-emerald-500/25 ring-emerald-400/60 text-emerald-50 cursor-default"
+                    : "ring-white/15 text-white/70 hover:bg-white/[0.06]")}
+        >
+            <Icon className="h-3.5 w-3.5" />
+            {label}
+        </button>
+    );
+}
+
 export function HouseManagePanel({
-    data, onClose,
+    data, hidden, onClose,
 }: {
     data: HouseManageData;
+    hidden: boolean;
     onClose: () => void;
 }) {
-    const { house, interior, isOwner, drugs, pedModels } = data;
-    const storageTypes = data.storageTypes || [];
-    // Admins manage every house (hire/dismiss workers, place/move/remove
-    // entities) regardless of ownership. canManage gates the same UI an
-    // owner sees.
+    const { house, isOwner, pedModels } = data;
     const canManage = isOwner || !!data.isAdmin;
-    const zones: Zone[] = interior?.zones || [];
-    const [selectedDrug, setSelectedDrug] = useState<string>(drugs[0]?.id ?? "");
+
     const [residentDraft, setResidentDraft] = useState("");
     const [residents, setResidents] = useState<string[]>(house.residents || []);
     const [employees, setEmployees] = useState<HouseEmployee[]>(data.employees || []);
-    const [entities, setEntities] = useState<Plot[]>(data.entities || []);
-    const [lockers, setLockers] = useState<Locker[]>(data.lockers || []);
-    const [selectedStorage, setSelectedStorage] = useState<string>(storageTypes[0]?.id ?? "");
     const [hireModel, setHireModel] = useState<string>(pedModels?.[0] ?? "");
     const [hireFirst, setHireFirst] = useState("");
     const [hireLast, setHireLast] = useState("");
 
-    useEffect(() => {
-        setEmployees(data.employees || []);
-    }, [data.employees]);
+    const [walking, setWalking] = useState(false);
+    const [walkKey, setWalkKey] = useState<string>("ESC");
 
-    useEffect(() => {
-        setEntities(data.entities || []);
-    }, [data.entities]);
+    const [tab, setTab] = useState<Tab>(data.initialAssigner ? "workers" : "property");
+    const [assigner, setAssigner] = useState<AssignerState | null>(data.initialAssigner ?? null);
 
-    useEffect(() => {
-        setLockers(data.lockers || []);
-    }, [data.lockers]);
-
-    useEffect(() => {
-        if (!selectedStorage && storageTypes[0]) setSelectedStorage(storageTypes[0].id);
-    }, [storageTypes, selectedStorage]);
-
-    useNuiEvent<{ lockers: Locker[] }>("houseLockersList", (d) => {
-        if (d?.lockers) setLockers(d.lockers);
-    });
-
-    useEffect(() => {
-        setResidents(house.residents || []);
-    }, [house.residents]);
+    useEffect(() => { setEmployees(data.employees || []); }, [data.employees]);
+    useEffect(() => { setResidents(house.residents || []); }, [house.residents]);
 
     useNuiEvent<{ employees: HouseEmployee[] }>("houseEmployeesList", (d) => {
         if (d?.employees) setEmployees(d.employees);
     });
-
-    // Live entity refresh: server broadcasts plotUpdate / plotRemoved
-    // when anyone places, moves, or removes a plot in this house and the
-    // client refetches + sends this event so the UI doesn't go stale.
-    useNuiEvent<{ entities: Plot[] }>("houseEntitiesList", (d) => {
-        if (d?.entities) setEntities(d.entities);
+    useNuiEvent<{ walking: boolean; key?: string }>("houseManageWalkState", (d) => {
+        setWalking(!!d?.walking);
+        if (d?.key) setWalkKey(d.key);
+    });
+    // Lua pushes this in response to the "Assign plots" click. Switches
+    // the Workers tab from the roster list to an inline plot picker.
+    useNuiEvent<AssignerState>("houseManageAssignerData", (d) => {
+        if (!d?.empId) return;
+        setAssigner(d);
+        setTab("workers");
     });
 
     const hireEmployee = () => {
@@ -145,53 +166,16 @@ export function HouseManagePanel({
         setHireLast("");
     };
 
-    const dismissEmployee = (empId: string) => {
+    const dismissEmployee = (empId: string) =>
         fetchNui("houseDismissEmployee", { houseId: house.id, empId });
-    };
 
-    const assignWorkerPlots = (empId: string) => {
+    const assignWorkerPlots = (empId: string) =>
         fetchNui("houseAssignWorkerPlots", { empId });
-    };
 
     const tenureColor =
         house.tenure === "owned" ? "text-emerald-300" :
         house.tenure === "rented" ? "text-amber-300" :
         "text-white/60";
-
-    const startPlacement = () => {
-        if (!selectedDrug) return;
-        fetchNui("houseStartPlacement", {
-            houseId: house.id,
-            drug: selectedDrug,
-        });
-    };
-
-    const movePlot = (plotId: string) => {
-        fetchNui("houseStartMovePlot", { houseId: house.id, plotId });
-    };
-
-    const deletePlot = (plotId: string) => {
-        fetchNui("houseDeletePlot", { plotId });
-    };
-
-    const startStorage = () => {
-        if (!selectedStorage) return;
-        fetchNui("houseStartStorage", { houseId: house.id, kind: selectedStorage });
-    };
-
-    const moveLocker = (lockerId: string) => {
-        fetchNui("houseStartMoveStorage", { lockerId });
-    };
-
-    const deleteLocker = (lockerId: string) => {
-        fetchNui("houseDeleteStorage", { lockerId });
-    };
-
-    const storageLabelFor = (kind: string) =>
-        storageTypes.find((s) => s.id === kind)?.label ?? kind;
-
-    const drugLabelFor = (id: string) =>
-        drugs.find((d) => d.id === id)?.label ?? id;
 
     const addResident = () => {
         const v = residentDraft.trim();
@@ -208,340 +192,412 @@ export function HouseManagePanel({
         fetchNui("houseSetResidents", { houseId: house.id, residents: next });
     };
 
+    // ─── Tab visibility ────────────────────────────────────────────────
+    const tabs: Tab[] = ["property"];
+    if (house.tenure !== "none" && canManage) tabs.push("access", "workers");
+
+    useEffect(() => {
+        if (!tabs.includes(tab)) setTab(tabs[0] ?? "property");
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [house.tenure, canManage]);
+
     return (
-        <div className="fixed inset-0 flex items-center justify-center pointer-events-none">
-            <div className="pointer-events-auto rounded-2xl bg-black/95 ring-1 ring-white/10 shadow-2xl w-[760px] max-w-[92vw] max-h-[84vh] flex flex-col overflow-hidden">
-                <div className="grid grid-cols-[auto_1fr_auto] items-center gap-3 px-5 h-11 border-b border-white/5 bg-white/[0.02]">
-                    <div className="flex items-center gap-2">
+        <div
+            className="fixed left-1/2 -translate-x-1/2 bottom-4 pointer-events-none"
+            style={{ visibility: hidden ? "hidden" : "visible" }}
+        >
+            <div
+                className={
+                    "pointer-events-auto rounded-2xl bg-black/95 ring-1 ring-white/10 shadow-2xl overflow-hidden " +
+                    "w-[680px] max-w-[96vw] h-[360px] flex flex-col " +
+                    (walking ? "opacity-70" : "")
+                }
+                style={walking ? { pointerEvents: "none" } : undefined}
+            >
+                {/* Header — label · tabs · walk · close */}
+                <div className="grid grid-cols-[auto_1fr_auto_auto] items-center gap-3 px-4 h-9 border-b border-white/5 bg-white/[0.02] shrink-0">
+                    <div className="flex items-center gap-2 whitespace-nowrap">
                         <Building className="h-4 w-4 text-emerald-300" />
                         <span className="text-sm text-white font-medium">{house.label}</span>
+                        <span className={"text-[10px] uppercase tracking-wider " + tenureColor}>
+                            {house.tenure}
+                            {house.tenure === "rented" && ` · due ${fmtDue(house.rent_due_at)}`}
+                        </span>
                     </div>
-                    <span className={"text-[11px] uppercase tracking-wider justify-self-center " + tenureColor}>
-                        {house.tenure}
-                        {house.tenure === "rented" && ` · due ${fmtDue(house.rent_due_at)}`}
-                    </span>
+                    <div className="flex justify-center gap-1">
+                        {tabs.includes("property") && (
+                            <TabButton label="Property" Icon={Home}
+                                active={tab === "property"} onClick={() => setTab("property")} />
+                        )}
+                        {tabs.includes("access") && (
+                            <TabButton label="Access" Icon={KeyRound}
+                                active={tab === "access"} onClick={() => setTab("access")} />
+                        )}
+                        {tabs.includes("workers") && (
+                            <TabButton label="Workers" Icon={Users}
+                                active={tab === "workers"} onClick={() => setTab("workers")} />
+                        )}
+                    </div>
+                    <button
+                        onClick={() => fetchNui("houseManageToggleWalk", {})}
+                        title={walking ? `Resume (${walkKey})` : `Walk (${walkKey})`}
+                        className={"h-7 px-2 inline-flex items-center gap-1.5 rounded ring-1 transition-colors text-[11px] " +
+                            (walking
+                                ? "bg-amber-500/25 ring-amber-400/60 text-amber-50"
+                                : "ring-white/20 text-white/75 hover:bg-white/[0.06]")}
+                    >
+                        <Footprints className="h-3.5 w-3.5" />
+                        {walking ? "Walking" : "Walk"}
+                    </button>
                     <button onClick={onClose}
                         className="h-7 w-7 inline-flex items-center justify-center rounded ring-1 ring-white/25 text-white/70 hover:text-red-200 hover:bg-red-500/15">
                         <X className="h-4 w-4" />
                     </button>
                 </div>
 
-                <div className="flex-1 overflow-y-auto p-5 space-y-4">
-                    {/* Unowned: show purchase / rent controls */}
-                    {house.tenure === "none" && (
-                        <div className="grid grid-cols-2 gap-3">
-                            {house.sale_enabled && (
-                                <button
-                                    onClick={() => fetchNui("housePurchase", { houseId: house.id, mode: "buy" })}
-                                    className="rounded-lg bg-emerald-500/10 ring-1 ring-emerald-400/40 p-4 text-left hover:bg-emerald-500/25 hover:ring-emerald-400/70 transition-colors">
-                                    <div className="flex items-center gap-2 text-emerald-200">
-                                        <DollarSign className="h-4 w-4" />
-                                        <span className="text-sm font-medium">Buy</span>
-                                    </div>
-                                    <div className="text-2xl font-semibold text-emerald-50 mt-1 tabular-nums">
-                                        {fmtMoney(house.sale_price)}
-                                    </div>
-                                    <div className="text-[11px] text-white/50">One-time payment, owned forever.</div>
-                                </button>
-                            )}
-                            {house.rent_enabled && (
-                                <button
-                                    onClick={() => fetchNui("housePurchase", { houseId: house.id, mode: "rent" })}
-                                    className="rounded-lg bg-amber-500/10 ring-1 ring-amber-400/40 p-4 text-left hover:bg-amber-500/25 hover:ring-amber-400/70 transition-colors">
-                                    <div className="flex items-center gap-2 text-amber-200">
-                                        <DollarSign className="h-4 w-4" />
-                                        <span className="text-sm font-medium">Rent</span>
-                                    </div>
-                                    <div className="text-2xl font-semibold text-amber-50 mt-1 tabular-nums">
-                                        {fmtMoney(house.rent_price)}
-                                    </div>
-                                    <div className="text-[11px] text-white/50">
-                                        per {Math.round(house.rent_cycle_ms / (24 * 60 * 60 * 1000))}d cycle
-                                    </div>
-                                </button>
-                            )}
-                            {!house.sale_enabled && !house.rent_enabled && (
-                                <div className="col-span-2 text-sm italic text-white/50">
-                                    This property isn't currently for sale or rent.
-                                </div>
-                            )}
-                        </div>
+                {/* Body */}
+                <div className="flex-1 min-h-0 overflow-y-auto p-4">
+                    {tab === "property" && (
+                        <PropertyTab data={data} canManage={canManage} />
                     )}
 
-                    {/* Owned: lease controls */}
-                    {house.tenure !== "none" && canManage && (
-                        <div className="grid grid-cols-2 gap-3">
-                            {house.tenure === "rented" && (
-                                <button
-                                    onClick={() => fetchNui("housePayRent", { houseId: house.id })}
-                                    className="rounded-lg bg-amber-500/10 ring-1 ring-amber-400/40 p-3 text-left hover:bg-amber-500/25">
-                                    <div className="text-sm text-amber-100 font-medium">Pay rent</div>
-                                    <div className="text-lg font-semibold text-amber-50 tabular-nums">
-                                        {fmtMoney(house.rent_price)}
-                                    </div>
-                                </button>
-                            )}
-                            <button
-                                onClick={() => fetchNui("houseCancelLease", { houseId: house.id })}
-                                className="rounded-lg bg-red-500/10 ring-1 ring-red-400/40 p-3 text-left hover:bg-red-500/25">
-                                <div className="text-sm text-red-200 font-medium">Cancel lease</div>
-                                <div className="text-[11px] text-white/55">
-                                    Lapses immediately. Entities stay until next purchase.
-                                </div>
-                            </button>
-                        </div>
+                    {tab === "access" && canManage && (
+                        <AccessTab
+                            residents={residents}
+                            residentDraft={residentDraft}
+                            setResidentDraft={setResidentDraft}
+                            addResident={addResident}
+                            removeResident={removeResident}
+                        />
                     )}
 
-                    {/* Residents */}
-                    {house.tenure !== "none" && canManage && (
-                        <div className="rounded-lg bg-white/[0.03] ring-1 ring-white/10 p-3 space-y-2">
-                            <div className="flex items-center gap-2 text-white/85">
-                                <Users className="h-4 w-4" />
-                                <span className="text-sm font-medium">Residents</span>
-                            </div>
-                            <div className="flex gap-2">
-                                <input value={residentDraft}
-                                    onChange={(e) => setResidentDraft(e.target.value)}
-                                    placeholder="citizenid"
-                                    className="flex-1 bg-white/[0.06] ring-1 ring-white/20 rounded-md px-3 py-2 text-sm text-white outline-none focus:ring-emerald-400/60" />
-                                <button onClick={addResident}
-                                    className="px-3 py-2 rounded-md ring-1 ring-emerald-400/50 bg-emerald-500/15 text-emerald-100 hover:bg-emerald-500/30 text-xs">
-                                    Add
-                                </button>
-                            </div>
-                            <div className="flex flex-wrap gap-1.5">
-                                {residents.length === 0 && (
-                                    <span className="text-[11px] italic text-white/40">Just the owner — add citizenids to share access.</span>
-                                )}
-                                {residents.map((r) => (
-                                    <span key={r} className="inline-flex items-center gap-1.5 rounded-md bg-white/[0.06] ring-1 ring-white/15 px-2 py-1 text-[11px] text-white/80">
-                                        {r}
-                                        <button onClick={() => removeResident(r)} className="text-white/45 hover:text-red-300">
-                                            <Trash2 className="h-3 w-3" />
-                                        </button>
-                                    </span>
-                                ))}
-                            </div>
-                        </div>
+                    {tab === "workers" && canManage && !assigner && (
+                        <WorkersTab
+                            employees={employees}
+                            pedModels={pedModels}
+                            hireModel={hireModel} setHireModel={setHireModel}
+                            hireFirst={hireFirst} setHireFirst={setHireFirst}
+                            hireLast={hireLast} setHireLast={setHireLast}
+                            onHire={hireEmployee}
+                            onDismiss={dismissEmployee}
+                            onAssign={assignWorkerPlots}
+                        />
                     )}
 
-                    {/* Employees */}
-                    {house.tenure !== "none" && canManage && (
-                        <div className="rounded-lg bg-white/[0.03] ring-1 ring-white/10 p-3 space-y-2">
-                            <div className="flex items-center gap-2 text-white/85">
-                                <UserPlus className="h-4 w-4" />
-                                <span className="text-sm font-medium">Workers</span>
-                                <span className="text-[11px] text-white/40">
-                                    · {employees.length} hired
-                                </span>
-                            </div>
-                            <div className="grid grid-cols-[1fr_auto_auto_auto] gap-2">
-                                <select value={hireModel}
-                                    onChange={(e) => setHireModel(e.target.value)}
-                                    className="bg-white/[0.06] ring-1 ring-white/20 rounded-md px-2 py-1.5 text-sm text-white outline-none">
-                                    {(pedModels || []).map((m) => (
-                                        <option key={m} value={m} className="bg-neutral-900">{m}</option>
-                                    ))}
-                                </select>
-                                <input value={hireFirst}
-                                    onChange={(e) => setHireFirst(e.target.value)}
-                                    placeholder="First"
-                                    className="w-24 bg-white/[0.06] ring-1 ring-white/20 rounded-md px-2 py-1.5 text-sm text-white outline-none focus:ring-emerald-400/60" />
-                                <input value={hireLast}
-                                    onChange={(e) => setHireLast(e.target.value)}
-                                    placeholder="Last"
-                                    className="w-24 bg-white/[0.06] ring-1 ring-white/20 rounded-md px-2 py-1.5 text-sm text-white outline-none focus:ring-emerald-400/60" />
-                                <button onClick={hireEmployee}
-                                    className="px-3 py-1.5 rounded-md ring-1 ring-emerald-400/50 bg-emerald-500/15 text-emerald-100 hover:bg-emerald-500/30 text-xs">
-                                    Hire
-                                </button>
-                            </div>
-                            <div className="space-y-1">
-                                {employees.length === 0 && (
-                                    <span className="text-[11px] italic text-white/40">
-                                        Hire a worker to tend every plot in this house automatically.
-                                    </span>
-                                )}
-                                {employees.map((e) => (
-                                    <div key={e.id} className="flex items-center gap-2 rounded-md bg-white/[0.04] ring-1 ring-white/10 px-2.5 py-1.5">
-                                        <span className="text-sm text-white/90">{e.firstName} {e.lastName}</span>
-                                        <span className="text-[10px] text-white/40 truncate">{e.model}</span>
-                                        <button onClick={() => assignWorkerPlots(e.id)}
-                                            title="Assign plots"
-                                            className="ml-auto h-6 w-6 inline-flex items-center justify-center rounded ring-1 ring-white/15 text-white/70 hover:text-emerald-200 hover:bg-emerald-500/15">
-                                            <ListChecks className="h-3.5 w-3.5" />
-                                        </button>
-                                        <button onClick={() => dismissEmployee(e.id)}
-                                            title="Dismiss"
-                                            className="h-6 w-6 inline-flex items-center justify-center rounded ring-1 ring-white/15 text-white/55 hover:text-red-300 hover:bg-red-500/15">
-                                            <Trash2 className="h-3.5 w-3.5" />
-                                        </button>
-                                    </div>
-                                ))}
-                            </div>
-                        </div>
+                    {tab === "workers" && canManage && assigner && (
+                        <InlineAssigner
+                            state={assigner}
+                            onClose={() => setAssigner(null)}
+                            onAddPlot={() =>
+                                fetchNui("housePickWorkerPlot", { empId: assigner.empId })
+                            }
+                            onSave={(plotIds) => {
+                                // Saves in-place — keep the assigner mounted so
+                                // the player can keep pruning slots without
+                                // re-opening the worker.
+                                fetchNui("houseManageAssignerSave", { empId: assigner.empId, plotIds });
+                                setAssigner({ ...assigner, assignedPlots: plotIds });
+                            }}
+                        />
                     )}
 
-                    {/* Existing entities — move/remove */}
-                    {house.tenure !== "none" && (data.canAccess || canManage) && (
-                        <div className="rounded-lg bg-white/[0.03] ring-1 ring-white/10 p-3 space-y-2">
-                            <div className="flex items-center gap-2 text-white/85">
-                                <Sprout className="h-4 w-4" />
-                                <span className="text-sm font-medium">Placed entities</span>
-                                <span className="text-[11px] text-white/40">
-                                    · {entities.length}
-                                </span>
-                            </div>
-                            <div className="space-y-1">
-                                {entities.length === 0 && (
-                                    <span className="text-[11px] italic text-white/40">
-                                        Nothing placed in this house yet. Use "Place an entity" below to add one.
-                                    </span>
-                                )}
-                                {entities.map((p) => (
-                                    <div key={p.id} className="flex items-center gap-2 rounded-md bg-white/[0.04] ring-1 ring-white/10 px-2.5 py-1.5">
-                                        <span className="text-sm text-white/90">{drugLabelFor(p.drug)}</span>
-                                        <span className="text-[10px] text-white/40 truncate">
-                                            {p.zone_id} · {p.cell_x},{p.cell_y}
-                                        </span>
-                                        {/* Output destination — workers carry harvested goods to
-                                            the selected locker. "—" leaves the plot unrouted; the
-                                            worker hoards harvest until a destination is assigned. */}
-                                        <select
-                                            value={p.output_locker_id || ""}
-                                            onChange={(e) =>
-                                                fetchNui("housePlotSetOutput", {
-                                                    plotId: p.id,
-                                                    lockerId: e.target.value || null,
-                                                })
-                                            }
-                                            title="Worker output destination"
-                                            className="ml-auto bg-white/[0.04] ring-1 ring-white/10 rounded px-1.5 py-0.5 text-[10px] text-white/80 outline-none focus:ring-emerald-400/50"
-                                        >
-                                            <option value="" className="bg-neutral-900">— no output</option>
-                                            {lockers.map((l) => (
-                                                <option key={l.id} value={l.id} className="bg-neutral-900">
-                                                    {storageLabelFor(l.kind)} · {l.zone_id}
-                                                </option>
-                                            ))}
-                                        </select>
-                                        <button onClick={() => movePlot(p.id)}
-                                            title="Move"
-                                            className="h-6 w-6 inline-flex items-center justify-center rounded ring-1 ring-white/15 text-white/70 hover:text-emerald-200 hover:bg-emerald-500/15">
-                                            <Move className="h-3.5 w-3.5" />
-                                        </button>
-                                        <button onClick={() => deletePlot(p.id)}
-                                            title="Remove"
-                                            className="h-6 w-6 inline-flex items-center justify-center rounded ring-1 ring-white/15 text-white/55 hover:text-red-300 hover:bg-red-500/15">
-                                            <Trash2 className="h-3.5 w-3.5" />
-                                        </button>
-                                    </div>
-                                ))}
-                            </div>
-                        </div>
-                    )}
+                </div>
+            </div>
 
-                    {/* Placed lockers — move/remove */}
-                    {house.tenure !== "none" && (data.canAccess || canManage) && (
-                        <div className="rounded-lg bg-white/[0.03] ring-1 ring-white/10 p-3 space-y-2">
-                            <div className="flex items-center gap-2 text-white/85">
-                                <Box className="h-4 w-4" />
-                                <span className="text-sm font-medium">Storage lockers</span>
-                                <span className="text-[11px] text-white/40">
-                                    · {lockers.length}
-                                </span>
-                            </div>
-                            <div className="space-y-1">
-                                {lockers.length === 0 && (
-                                    <span className="text-[11px] italic text-white/40">
-                                        No lockers placed yet. Use "Place a locker" below.
-                                    </span>
-                                )}
-                                {lockers.map((l) => (
-                                    <div key={l.id} className="flex items-center gap-2 rounded-md bg-white/[0.04] ring-1 ring-white/10 px-2.5 py-1.5">
-                                        <span className="text-sm text-white/90">{storageLabelFor(l.kind)}</span>
-                                        <span className="text-[10px] text-white/40 truncate">
-                                            {l.zone_id} · {l.cell_x},{l.cell_y} · {l.slots} slots
-                                        </span>
-                                        <button onClick={() => moveLocker(l.id)}
-                                            title="Move"
-                                            className="ml-auto h-6 w-6 inline-flex items-center justify-center rounded ring-1 ring-white/15 text-white/70 hover:text-emerald-200 hover:bg-emerald-500/15">
-                                            <Move className="h-3.5 w-3.5" />
-                                        </button>
-                                        <button onClick={() => deleteLocker(l.id)}
-                                            title="Remove"
-                                            className="h-6 w-6 inline-flex items-center justify-center rounded ring-1 ring-white/15 text-white/55 hover:text-red-300 hover:bg-red-500/15">
-                                            <Trash2 className="h-3.5 w-3.5" />
-                                        </button>
-                                    </div>
-                                ))}
-                            </div>
-                        </div>
-                    )}
+            {/* Walk-mode banner — pointer-events on so the player can also
+                click it back into focus mode. Anchored above the panel. */}
+            {walking && (
+                <div className="absolute left-1/2 -translate-x-1/2 -top-9 pointer-events-auto">
+                    <button
+                        onClick={() => fetchNui("houseManageToggleWalk", {})}
+                        className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full ring-1 ring-amber-400/50 bg-amber-500/20 text-amber-50 text-xs hover:bg-amber-500/35"
+                    >
+                        <Footprints className="h-3.5 w-3.5" />
+                        Walking — press <kbd className="px-1 rounded bg-white/10 ring-1 ring-white/15 font-mono text-[10px]">{walkKey}</kbd> or click to resume
+                    </button>
+                </div>
+            )}
+        </div>
+    );
+}
 
-                    {/* Storage placement */}
-                    {house.tenure !== "none" && (data.canAccess || canManage) && storageTypes.length > 0 && (
-                        <div className="rounded-lg bg-white/[0.03] ring-1 ring-white/10 p-3 space-y-2">
-                            <div className="flex items-center gap-2 text-white/85">
-                                <Box className="h-4 w-4" />
-                                <span className="text-sm font-medium">Place a locker</span>
-                            </div>
-                            {zones.length === 0 ? (
-                                <div className="text-[11px] italic text-amber-200/80">
-                                    This property's interior has no zones yet.
-                                </div>
-                            ) : (
-                                <>
-                                    <select value={selectedStorage} onChange={(e) => setSelectedStorage(e.target.value)}
-                                        className="w-full bg-white/[0.06] ring-1 ring-white/20 rounded-md px-2.5 py-1.5 text-sm text-white outline-none">
-                                        {storageTypes.map((s) => (
-                                            <option key={s.id} value={s.id} className="bg-neutral-900">
-                                                {s.label} ({s.slots} slots)
-                                            </option>
-                                        ))}
-                                    </select>
-                                    <button onClick={startStorage}
-                                        className="w-full inline-flex items-center justify-center gap-2 px-3 py-2 rounded-md ring-1 ring-emerald-400/50 bg-emerald-500/15 text-emerald-100 hover:bg-emerald-500/30 text-sm">
-                                        <Hammer className="h-4 w-4" /> Start placement
-                                    </button>
-                                </>
-                            )}
-                        </div>
-                    )}
+// ─── Tabs ────────────────────────────────────────────────────────────────
 
-                    {/* Placement */}
-                    {house.tenure !== "none" && (data.canAccess || canManage) && (
-                        <div className="rounded-lg bg-white/[0.03] ring-1 ring-white/10 p-3 space-y-2">
-                            <div className="flex items-center gap-2 text-white/85">
-                                <Sprout className="h-4 w-4" />
-                                <span className="text-sm font-medium">Place an entity</span>
+function PropertyTab({ data, canManage }: { data: HouseManageData; canManage: boolean }) {
+    const { house } = data;
+    return (
+        <div className="space-y-3">
+            {house.tenure === "none" && (
+                <div className="grid grid-cols-2 gap-3">
+                    {house.sale_enabled && (
+                        <button
+                            onClick={() => fetchNui("housePurchase", { houseId: house.id, mode: "buy" })}
+                            className="rounded-lg bg-emerald-500/10 ring-1 ring-emerald-400/40 p-4 text-left hover:bg-emerald-500/25 hover:ring-emerald-400/70 transition-colors">
+                            <div className="flex items-center gap-2 text-emerald-200">
+                                <DollarSign className="h-4 w-4" />
+                                <span className="text-sm font-medium">Buy</span>
                             </div>
-                            {zones.length === 0 ? (
-                                <div className="text-[11px] italic text-amber-200/80">
-                                    This property's interior has no zones yet. An admin needs to open
-                                    /drugs → Interiors → edit "{interior?.label ?? "this interior"}" and
-                                    add at least one zone before entities can be placed.
-                                </div>
-                            ) : (
-                                <>
-                                    <select value={selectedDrug} onChange={(e) => setSelectedDrug(e.target.value)}
-                                        className="w-full bg-white/[0.06] ring-1 ring-white/20 rounded-md px-2.5 py-1.5 text-sm text-white outline-none">
-                                        {drugs.map((d) => (
-                                            <option key={d.id} value={d.id} className="bg-neutral-900">{d.label}</option>
-                                        ))}
-                                    </select>
-                                    <button onClick={startPlacement}
-                                        className="w-full inline-flex items-center justify-center gap-2 px-3 py-2 rounded-md ring-1 ring-emerald-400/50 bg-emerald-500/15 text-emerald-100 hover:bg-emerald-500/30 text-sm">
-                                        <Hammer className="h-4 w-4" /> Start placement
-                                    </button>
-                                    <div className="text-[11px] italic text-white/40">
-                                        Aim where you want it. Snaps to grid when over a zone · scroll to rotate · E to confirm · ESC to cancel.
-                                    </div>
-                                </>
-                            )}
+                            <div className="text-2xl font-semibold text-emerald-50 mt-1 tabular-nums">
+                                {fmtMoney(house.sale_price)}
+                            </div>
+                            <div className="text-[11px] text-white/50">One-time payment, owned forever.</div>
+                        </button>
+                    )}
+                    {house.rent_enabled && (
+                        <button
+                            onClick={() => fetchNui("housePurchase", { houseId: house.id, mode: "rent" })}
+                            className="rounded-lg bg-amber-500/10 ring-1 ring-amber-400/40 p-4 text-left hover:bg-amber-500/25 hover:ring-amber-400/70 transition-colors">
+                            <div className="flex items-center gap-2 text-amber-200">
+                                <DollarSign className="h-4 w-4" />
+                                <span className="text-sm font-medium">Rent</span>
+                            </div>
+                            <div className="text-2xl font-semibold text-amber-50 mt-1 tabular-nums">
+                                {fmtMoney(house.rent_price)}
+                            </div>
+                            <div className="text-[11px] text-white/50">
+                                per {Math.round(house.rent_cycle_ms / (24 * 60 * 60 * 1000))}d cycle
+                            </div>
+                        </button>
+                    )}
+                    {!house.sale_enabled && !house.rent_enabled && (
+                        <div className="col-span-2 text-sm italic text-white/50">
+                            This property isn't currently for sale or rent.
                         </div>
                     )}
                 </div>
+            )}
+
+            {house.tenure !== "none" && canManage && (
+                <div className="grid grid-cols-2 gap-3">
+                    {house.tenure === "rented" && (
+                        <button
+                            onClick={() => fetchNui("housePayRent", { houseId: house.id })}
+                            className="rounded-lg bg-amber-500/10 ring-1 ring-amber-400/40 p-3 text-left hover:bg-amber-500/25">
+                            <div className="text-sm text-amber-100 font-medium">Pay rent</div>
+                            <div className="text-lg font-semibold text-amber-50 tabular-nums">
+                                {fmtMoney(house.rent_price)}
+                            </div>
+                        </button>
+                    )}
+                    <button
+                        onClick={() => fetchNui("houseCancelLease", { houseId: house.id })}
+                        className="rounded-lg bg-red-500/10 ring-1 ring-red-400/40 p-3 text-left hover:bg-red-500/25">
+                        <div className="text-sm text-red-200 font-medium">Cancel lease</div>
+                        <div className="text-[11px] text-white/55">
+                            Lapses immediately. Entities stay until next purchase.
+                        </div>
+                    </button>
+                </div>
+            )}
+
+            {house.tenure !== "none" && !canManage && (
+                <div className="text-[12px] italic text-white/55">
+                    You have access to this property but aren't the owner. Speak to
+                    the owner if you want to manage workers or placement.
+                </div>
+            )}
+        </div>
+    );
+}
+
+function AccessTab({
+    residents, residentDraft, setResidentDraft, addResident, removeResident,
+}: {
+    residents: string[];
+    residentDraft: string;
+    setResidentDraft: (v: string) => void;
+    addResident: () => void;
+    removeResident: (cid: string) => void;
+}) {
+    return (
+        <div className="space-y-3">
+            <div className="flex items-center gap-2 text-white/85">
+                <Users className="h-4 w-4" />
+                <span className="text-sm font-medium">Residents</span>
+                <span className="text-[11px] text-white/40">· {residents.length}</span>
+            </div>
+            <div className="flex gap-2">
+                <input value={residentDraft}
+                    onChange={(e) => setResidentDraft(e.target.value)}
+                    placeholder="citizenid"
+                    className="flex-1 bg-white/[0.06] ring-1 ring-white/20 rounded-md px-3 py-2 text-sm text-white outline-none focus:ring-emerald-400/60" />
+                <button onClick={addResident}
+                    className="px-3 py-2 rounded-md ring-1 ring-emerald-400/50 bg-emerald-500/15 text-emerald-100 hover:bg-emerald-500/30 text-xs">
+                    Add
+                </button>
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+                {residents.length === 0 && (
+                    <span className="text-[11px] italic text-white/40">
+                        Just the owner — add citizenids to share access.
+                    </span>
+                )}
+                {residents.map((r) => (
+                    <span key={r} className="inline-flex items-center gap-1.5 rounded-md bg-white/[0.06] ring-1 ring-white/15 px-2 py-1 text-[11px] text-white/80">
+                        {r}
+                        <button onClick={() => removeResident(r)} className="text-white/45 hover:text-red-300">
+                            <Trash2 className="h-3 w-3" />
+                        </button>
+                    </span>
+                ))}
+            </div>
+        </div>
+    );
+}
+
+function WorkersTab({
+    employees, pedModels,
+    hireModel, setHireModel,
+    hireFirst, setHireFirst,
+    hireLast, setHireLast,
+    onHire, onDismiss, onAssign,
+}: {
+    employees: HouseEmployee[];
+    pedModels: string[];
+    hireModel: string; setHireModel: (v: string) => void;
+    hireFirst: string; setHireFirst: (v: string) => void;
+    hireLast: string; setHireLast: (v: string) => void;
+    onHire: () => void;
+    onDismiss: (id: string) => void;
+    onAssign: (id: string) => void;
+}) {
+    return (
+        <div className="space-y-3">
+            <div className="flex items-center gap-2 text-white/85">
+                <UserPlus className="h-4 w-4" />
+                <span className="text-sm font-medium">Workers</span>
+                <span className="text-[11px] text-white/40">· {employees.length} hired</span>
+            </div>
+            <div className="grid grid-cols-[1fr_auto_auto_auto] gap-2">
+                <select value={hireModel}
+                    onChange={(e) => setHireModel(e.target.value)}
+                    className="bg-white/[0.06] ring-1 ring-white/20 rounded-md px-2 py-1.5 text-sm text-white outline-none">
+                    {(pedModels || []).map((m) => (
+                        <option key={m} value={m} className="bg-neutral-900">{m}</option>
+                    ))}
+                </select>
+                <input value={hireFirst}
+                    onChange={(e) => setHireFirst(e.target.value)}
+                    placeholder="First"
+                    className="w-24 bg-white/[0.06] ring-1 ring-white/20 rounded-md px-2 py-1.5 text-sm text-white outline-none focus:ring-emerald-400/60" />
+                <input value={hireLast}
+                    onChange={(e) => setHireLast(e.target.value)}
+                    placeholder="Last"
+                    className="w-24 bg-white/[0.06] ring-1 ring-white/20 rounded-md px-2 py-1.5 text-sm text-white outline-none focus:ring-emerald-400/60" />
+                <button onClick={onHire}
+                    className="px-3 py-1.5 rounded-md ring-1 ring-emerald-400/50 bg-emerald-500/15 text-emerald-100 hover:bg-emerald-500/30 text-xs">
+                    Hire
+                </button>
+            </div>
+            <div className="space-y-1">
+                {employees.length === 0 && (
+                    <span className="text-[11px] italic text-white/40">
+                        Hire a worker to tend every plot in this house automatically.
+                    </span>
+                )}
+                {employees.map((e) => (
+                    <div key={e.id} className="flex items-center gap-2 rounded-md bg-white/[0.04] ring-1 ring-white/10 px-2.5 py-1.5">
+                        <span className="text-sm text-white/90">{e.firstName} {e.lastName}</span>
+                        <span className="text-[10px] text-white/40 truncate">{e.model}</span>
+                        <button onClick={() => onAssign(e.id)}
+                            title="Assign plots"
+                            className="ml-auto h-6 w-6 inline-flex items-center justify-center rounded ring-1 ring-white/15 text-white/70 hover:text-emerald-200 hover:bg-emerald-500/15">
+                            <ListChecks className="h-3.5 w-3.5" />
+                        </button>
+                        <button onClick={() => onDismiss(e.id)}
+                            title="Dismiss"
+                            className="h-6 w-6 inline-flex items-center justify-center rounded ring-1 ring-white/15 text-white/55 hover:text-red-300 hover:bg-red-500/15">
+                            <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
+}
+
+// Slot grid: shows each currently-assigned plot as a card and pads up to
+// `maxPlots` with empty "+ add" slots. Removing a plot saves the new list
+// immediately. Clicking an empty slot drops out to the in-world picker
+// (raycast a plot to add); the panel re-opens with refreshed state once
+// the player confirms or cancels in-world.
+function InlineAssigner({
+    state, onClose, onAddPlot, onSave,
+}: {
+    state: AssignerState;
+    onClose: () => void;
+    onAddPlot: () => void;
+    onSave: (plotIds: string[]) => void;
+}) {
+    const maxPlots = Math.max(1, state.maxPlots || 10);
+    const assignedIds = state.assignedPlots ?? [];
+    const plotById = new Map(state.plots.map((p) => [p.id, p]));
+    const assignedPlots = assignedIds
+        .map((id) => plotById.get(id))
+        .filter((p): p is AssignerPlot => !!p);
+    const filledCount = assignedPlots.length;
+    const emptyCount = Math.max(0, maxPlots - filledCount);
+
+    const removePlot = (plotId: string) => {
+        onSave(assignedIds.filter((id) => id !== plotId));
+    };
+
+    return (
+        <div className="h-full flex flex-col gap-2 min-h-0">
+            <div className="flex items-center gap-2 shrink-0">
+                <button onClick={onClose}
+                    className="h-7 w-7 inline-flex items-center justify-center rounded ring-1 ring-white/20 text-white/70 hover:bg-white/[0.06]"
+                    title="Back to workers">
+                    <ArrowLeft className="h-3.5 w-3.5" />
+                </button>
+                <ListChecks className="h-4 w-4 text-emerald-300" />
+                <span className="text-sm font-medium text-white/90">Assigned plots</span>
+                <span className="text-[11px] text-white/55">· {state.firstName} {state.lastName}</span>
+                <span className="ml-auto text-[11px] text-white/55 tabular-nums">
+                    {filledCount} / {maxPlots}
+                </span>
+            </div>
+
+            <div className="flex-1 overflow-y-auto pr-1 -mr-1 grid grid-cols-2 gap-1.5 content-start">
+                {assignedPlots.map((p) => (
+                    <div key={p.id}
+                        className="grid grid-cols-[20px_1fr_auto] items-center gap-2 rounded-md ring-1 ring-emerald-400/40 bg-emerald-500/10 px-2.5 py-1.5">
+                        <Sprout className="h-3.5 w-3.5 text-emerald-300" />
+                        <div className="min-w-0">
+                            <div className="text-xs font-medium text-emerald-50 truncate">
+                                {p.drug} · stage {p.stage}
+                            </div>
+                            <div className="text-[10px] text-white/50 tabular-nums truncate">
+                                {p.x.toFixed(1)}, {p.y.toFixed(1)}, {p.z.toFixed(1)}
+                            </div>
+                        </div>
+                        <button onClick={() => removePlot(p.id)}
+                            title="Remove"
+                            className="h-6 w-6 inline-flex items-center justify-center rounded ring-1 ring-white/15 text-white/55 hover:text-red-300 hover:bg-red-500/15">
+                            <Trash2 className="h-3 w-3" />
+                        </button>
+                    </div>
+                ))}
+                {Array.from({ length: emptyCount }).map((_, i) => (
+                    <button key={`empty-${i}`}
+                        onClick={i === 0 ? onAddPlot : undefined}
+                        disabled={i !== 0}
+                        title={i === 0 ? "Pick a plot in-world" : "Empty slot"}
+                        className={
+                            "flex items-center justify-center gap-1.5 rounded-md ring-1 border-dashed px-2.5 py-2 text-xs transition-colors " +
+                            (i === 0
+                                ? "ring-emerald-400/40 text-emerald-200 hover:bg-emerald-500/15 cursor-pointer "
+                                : "ring-white/10 text-white/30 cursor-default ")
+                        }
+                    >
+                        <Plus className="h-3.5 w-3.5" />
+                        {i === 0 ? "Add plot" : "Empty"}
+                    </button>
+                ))}
+            </div>
+
+            <div className="text-[11px] text-white/45 italic shrink-0">
+                Workers may tend up to {maxPlots} plots. Adding sends you in-world to point at a plot.
             </div>
         </div>
     );

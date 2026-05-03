@@ -2,92 +2,119 @@ Config = {}
 
 Config.Debug = false
 
--- Debug shortcut command — opens the cutting view on the first stage-3
--- plot it can find. Real entry is via ox_target on the plot itself.
+-- Debug shortcut: opens the cutting view on the first stage-3 plot found.
 Config.Command = "growop"
 
--- ─── Unified plant scene ───────────────────────────────────────────────────
--- Tunable parameters for the "Interact with Plant" scene. Camera tween
--- duration is in milliseconds; inspect orbit rate is degrees/second.
+-- ─── Plant scene ──────────────────────────────────────────────────────────
+-- All per-action mechanics + camera framing for in-world plant interactions.
+-- Global across drugs; per-drug entries below only specify the recipe
+-- (label, items, grow times, stage models).
+--
+-- Each `camera` block:
+--   distanceMul   pull-back multiplier on the auto-fit camera distance
+--   heightOffset  metres added to the look point to position the camera
+--   lookOffset    metres added to the look point itself (tilt up/down)
+--   fov           field of view in degrees
+--
+-- menuCam is special — distance/camZ/lookZ are absolute world-Z offsets
+-- from the plot origin (not auto-fit).
 Config.PlantScene = {
-    transitionMs            = 600,
-    inspectOrbitDegPerSec   = 12.0,
+    transitionMs = 600,
+
+    menuCam = {
+        distance = 1.6,
+        camZ     = 1.45,
+        lookZ    = 0.75,
+        fov      = 40.0,
+    },
+
+    soiling = {
+        bag = {
+            full   = "pickle_soil_bag_01",
+            ripped = "pickle_soil_ripbag_01",
+        },
+        ripDistance       = 0.6,    -- normalised cursor travel to fully rip
+        pourAngleDeg      = 60.0,   -- |pitch| past which soil pours
+        secondsPerFullBag = 3.0,    -- pour time to fully fill a pot
+        soilStartZ        = -0.35,  -- soil prop Z at 0% fill
+        camera            = { fov = 38.0, distanceMul = 1.4, heightOffset = 1.0, lookOffset = 0.0 },
+    },
+
+    planting = {
+        capsule = {
+            capsule = "pickle_capsule_01",
+            cap     = "pickle_capsule_cap_01",
+            seed    = "pickle_capsule_seed_01",
+        },
+        rubble          = "pickle_soil_rubble_01",
+        rubbleCount     = 4,
+        rubbleRadius    = 0.09,
+        rubbleConvergeK = 0.75,
+        rubbleSoilZ     = 0.0,
+        seedZ           = 0.325,
+        tiltDropDeg     = 165.0,    -- |roll| past which the seed drops
+        camera          = { fov = 38.0, distanceMul = 1.4, heightOffset = 1.0, lookOffset = 0.0 },
+    },
+
+    watering = {
+        pitcher       = "pickle_water_pot_01",
+        liquid        = "pickle_water_liquid_01",
+        liquidMaxZ    = 0.0,        -- liquid Z at 100% full
+        liquidMinZ    = -0.11,      -- liquid Z at 0% empty
+        pourAngleDeg  = 65.0,       -- pitcher pitch past which water pours
+        secondsPerFullPitcher = 4.0,
+        pourPerPlot   = 0.20,       -- 0..1 per registered pour
+        partFx        = { dict = "core", name = "ent_amb_pouring_water_into_pot" },
+        potFx         = { dict = "core", name = "ent_amb_pouring_water_into_pot" },
+        potFxZ        = 0.25,
+        camera        = { fov = 38.0, distanceMul = 1.4, heightOffset = 0.6, lookOffset = 0.0 },
+    },
+
+    cutting = {
+        tool     = "pickle_scissors_01",
+        toolBone = 28422,           -- ped right hand
+        toolAnim = {
+            dict = "anim@amb@business@weed@weed_inspecting_lo_med_hi@",
+            clip = "weigh_v5_cuttingbuds_buyer",
+        },
+        fadeMs      = 400,
+        fallMs      = 2000,
+        fallCarrier = "sf_prop_sf_apple_01a",
+        camera      = { fov = 35.0, distanceMul = 0.8, heightOffset = 0.8, lookOffset = 0.1 },
+    },
 }
 
 -- ─── NPC Employees ─────────────────────────────────────────────────────────
--- Per-task timing for NPC workers managed via /employees.
---   workMs        — duration of the mechanic animation per action (soil,
---                   plant, water, harvest one bud). Server fires the
---                   actual gameplay mutation when this expires.
---   cooldownMs    — pause between consecutive actions while idle.
---   walkMinMs     — floor for any goto duration (prevents teleport-feel
---                   on very close plots).
---   walkMaxMs     — ceiling so far-away plots don't stall the schedule.
---   walkSpeedMps  — meters per second used to scale walk time by
---                   distance. The local ped uses TaskGoToCoordAnyMeans
---                   at its own speed; this number drives the deadline.
---   mechanicAnim  — animation played during `work` tasks.
 Config.Employees = {
-    -- Animation duration per action. `default` is used for any action
-    -- that doesn't have its own override below. Action keys: "soil",
-    -- "plant", "water", "harvest". Server fires the gameplay mutation
-    -- when this expires.
     workMs = {
         default = 4500,
         soil    = 4500,
         plant   = 4500,
         water   = 4500,
         harvest = 1000,
-        deposit = 2500, -- time spent at the destination locker per dump
+        deposit = 2500,
     },
-    -- How many items the worker can carry before they must dump into a
-    -- destination locker. Total across all routed buckets. Reaching the
-    -- cap interrupts new harvest tasks until the worker has deposited.
-    carryCapacity = 25,
-    cooldownMs   = 1000,
-    walkMinMs    = 10000,
-    walkMaxMs    = 15000,
-    walkSpeedMps = 1.5,
-    -- Animation played for every NPC work action (soil / plant / water /
-    -- harvest). Scenario is left nil so the client always falls through
-    -- to the anim path — `mini@repair / fixing_a_ped` reads as a kneeling
-    -- mechanic-style fix that works for every action without needing a
-    -- prop attached to the ped's hand.
+    carryCapacity = 25,         -- items before the worker must deposit
+    cooldownMs    = 1000,
+    walkMinMs     = 10000,
+    walkMaxMs     = 15000,
+    walkSpeedMps  = 1.5,
     mechanicScenario = nil,
     mechanicAnim = {
         dict = "mini@repair",
         clip = "fixing_a_ped",
     },
-    -- Where the ped stands when working a plot, expressed in the plot's
-    -- local frame (x = right, y = forward, z = up — so the default
-    -- {0, 1, 0} stands the ped 1m in front of the pot facing it).
-    workOffset = vector3(0.0, -1.0, 0.0),
-    -- Distance (m) at which a walking ped is considered "arrived" — the
-    -- client signals the server to skip the remaining walk-min floor and
-    -- start the work animation immediately.
+    workOffset = vector3(0.0, -1.0, 0.0),  -- ped stand point in plot frame
     arriveDistance = 1.25,
+    maxPlotsPerWorker = 10,
 }
 
 -- ─── Housing ───────────────────────────────────────────────────────────────
--- Houses (world buildings) and reusable interior templates live in DB and
--- are CRUD-managed via the `/drugs` admin UI. The block below tunes the
--- shared player-facing behaviour (grid renderer, lease ticker, etc).
---
--- Houses are either:
---   * teleport — bucketed, the player teleports to the interior's door
---                point and exits via an in-interior ox_target.
---   * mlo      — existing in-world building, no bucket, no teleport;
---                ox_lib polyzone is used to detect entry/exit instead.
+-- Houses + interiors live in DB and are CRUD-managed via /drugs.
 Config.Housing = {
-    -- Cell size (in metres) used by the in-world zone picker. Cells are
-    -- always axis-aligned squares of this size.
     gridCellSize = 0.5,
 
-    -- Preview models used when an admin picks an interior / world point.
-    -- `isPed = true` spawns the model as a ped (e.g. for the idle employee
-    -- point); otherwise it's spawned as a prop. Each entry's model is also
-    -- used to render the *other* already-placed points in-world while a
-    -- pick is in progress, so the admin can see the full layout.
+    -- Preview models for admin pick flows.
     placementProps = {
         door       = { model = "v_ilev_fh_frntdoor" },
         exit       = { model = "v_ilev_fh_frntdoor" },
@@ -96,169 +123,80 @@ Config.Housing = {
         house_door = { model = "v_ilev_fh_frntdoor" },
     },
 
-    -- "Same z-level (grace penalty is fine)" — entities are placed at the
-    -- zone's z but the visualizer accepts a vertical tolerance per zone.
-    -- This is just the default; zones can override.
     defaultZTolerance = 0.6,
-
-    -- Lease ticker. Sweep every `sweepIntervalMs`; if rent_due_at is past
-    -- the current time the lease lapses (entities frozen, peds despawned,
-    -- residents booted from the bucket).
     sweepIntervalMs   = 60 * 1000,
     rentGracePeriodMs = 0,
+    bucketBase        = 100000,
 
-    -- Routing buckets are derived from the house id: bucketBase + hash.
-    -- 100000 keeps us clear of typical world / framework reserved ranges.
-    bucketBase = 100000,
-
-    -- Player-side placement preview tuning. Colours are 0..255.
     placement = {
-        previewAlpha    = 180,
-        gridLineAlpha   = 90,
-        validColor      = { r = 80,  g = 200, b = 120 },
-        invalidColor    = { r = 230, g = 80,  b = 80 },
-        emptyColor      = { r = 220, g = 220, b = 220 },
-        occupiedColor   = { r = 110, g = 110, b = 110 },
-        cellHeight      = 0.05, -- visual thickness of the rendered cell tile
+        previewAlpha  = 180,
+        gridLineAlpha = 90,
+        validColor    = { r = 80,  g = 200, b = 120 },
+        invalidColor  = { r = 230, g = 80,  b = 80 },
+        emptyColor    = { r = 220, g = 220, b = 220 },
+        occupiedColor = { r = 110, g = 110, b = 110 },
+        cellHeight    = 0.05,
     },
 
-    -- Money handling. "cash" mode debits a cash item via the Inventory
-    -- bridge; "framework" mode calls Player.GetMoney/RemoveMoney through
-    -- the housing module's inline framework probe (qb/qbx/esx).
     money = {
-        mode      = "framework",          -- "cash" | "framework"
-        cashItem  = "cash",               -- only used in "cash" mode
-        moneyType = "cash",               -- framework wallet ("cash" | "bank")
+        mode      = "framework",    -- "cash" | "framework"
+        cashItem  = "cash",
+        moneyType = "cash",         -- "cash" | "bank"
     },
 
-    -- Teleport transition tuning.
     teleport = {
         fadeOutMs = 400,
         fadeInMs  = 400,
     },
 }
 
--- ─── Drug definitions ───────────────────────────────────────────────────────
--- Plot LOCATIONS are no longer here — they live in `pickle_drugs_entities`
--- and are CRUD-managed via the `/drugs` admin UI.
---
--- Each entry below is the static *recipe* for a drug type (models, stages,
--- scene parameters). When an admin creates a plot they pick from this
--- table. Modules read from here:
---   modules/grow      → stages, capsule, soilBag (rendering + lifecycle)
---   modules/cutting   → cutting (camera, scissors, fall behaviour)
---   modules/watering  → watering (pitcher kinematics, particles, level)
-Config.Drugs = {}
-
 -- ─── Dealing ───────────────────────────────────────────────────────────────
--- NPC customers + dealing zones, managed via /drugs → "Dealing" tab. Players
--- receive offers in the phone Messages app, accept / negotiate / reject,
--- then have `completeWindowMs` to meet the customer in-world.
+-- NPC customers + dealing zones, managed via /drugs → "Dealing" tab.
 Config.Dealing = {
-    -- Per-customer cooldown after a successful deal with a given player.
     cooldownMs        = 5 * 60 * 1000,
-    -- After an expired deal, the customer goes quiet for this long for
-    -- that player. Stops "spam offer same customer if I let it expire".
     failureCooldownMs = 10 * 60 * 1000,
-    -- Maximum quantity per offer. Server clamps to whatever the player
-    -- actually holds.
     maxQty            = 10,
-    -- Time the player has to physically meet the customer at the deal
-    -- point after accepting.
     completeWindowMs  = 6 * 60 * 1000,
-    -- Player counter must be ≥ this fraction of the original ask total
-    -- for the customer to accept outright. Below it, the customer
-    -- counters once between (player offer + original) / 2; below ~75%
-    -- of original they reject.
     acceptThreshold   = 0.90,
-    -- How often the scheduler ticks looking for new offers + expiry.
     schedulerTickMs   = 30 * 1000,
-    -- Per-player base interval between offer attempts.
     offerIntervalMs   = 4 * 60 * 1000,
-    -- Random jitter applied to the unit price each offer (e.g. 0.15 →
-    -- ±15%). Negotiation uses the original unit price as the anchor.
     priceJitter       = 0.15,
-    -- Distance (m) from a deal point at which the customer ped
-    -- streams in. Until the player is within this range the ped is
-    -- "pending" — only a navigation blip exists. Spawning at range
-    -- avoids a known issue where the ground-Z probe falls back to the
-    -- payload Z (admin-set zone Z) because the chunk isn't loaded,
-    -- leaving the customer floating in the air or buried in terrain.
+    -- Streaming distance for customer ped spawn. Spawning at range avoids
+    -- the ground-Z probe falling back to the admin-set zone Z when the
+    -- chunk isn't loaded.
     streamRange       = 80.0,
+
+    -- Dealer cut: default % the dealer keeps when they auto-fulfil an
+    -- offer. Per-dealer override lives in pickle_drugs_dealers.cut_pct.
+    dealerCutPct           = 0.10,
+    -- How long the dealer + customer ped stand on the deal point before
+    -- the auto-deal settles (item decremented + owner credited).
+    dealerAutoCompleteMs   = 12000,
+    -- Slot capacity for the dealer's on-person inventory (same UI as a
+    -- locker — split / combine / rearrange / deposit / withdraw).
+    dealerInventorySlots   = 25,
 }
+
+-- ─── Drugs ─────────────────────────────────────────────────────────────────
+-- Each drug is a recipe: label, deal price, items, grow timing, and stage
+-- models. Scene mechanics (soiling/planting/watering/cutting) are global
+-- and live in Config.PlantScene above.
+Config.Drugs = {}
 
 Config.Drugs.weed = {
     label = "Weed",
-    -- Sale price per unit (cash). Multiplied by zone risk_mult and a
-    -- small jitter at offer time. Used by the Dealing scheduler.
-    deal = { basePrice = 35 },
+    deal  = { basePrice = 35 },
 
-    -- Item names (resolved through the inventory bridge).
-    seedItem    = "weed_seed",
-    pitcherItem = nil, -- nil = pitcher is summoned by the interaction; set
-                       -- a string to gate "Water" behind owning an item.
+    -- Inventory items.
+    seedItem    = "pickle_weed_seed",   -- consumed when planted
+    harvestItem = "pickle_weed_bud",    -- produced by cutting
 
-    -- Pre-stage props shown after the seed is planted but before stage 1
-    -- spawns. All three share the capsule's root coords.
-    capsule = {
-        capsule = "pickle_capsule_01",
-        cap     = "pickle_capsule_cap_01",
-        seed    = "pickle_capsule_seed_01",
-    },
+    -- Growth timing.
+    totalGrowMs     = 60 * 1000,        -- planted → fully grown
+    waterCapacityMs = 10 * 60 * 1000,   -- reservoir between top-ups
 
-    -- Soil bag props shown during the "Add soil" interaction. The full
-    -- bag fades out as the player rips it; the ripped bag sits inside it
-    -- and remains for the pour phase.
-    soilBag = {
-        full   = "pickle_soil_bag_01",
-        ripped = "pickle_soil_ripbag_01",
-    },
-
-    -- Interactive soiling scene (modules/soiling). Player drags across the
-    -- top of the soil bag to rip it (full bag fades to reveal the ripped
-    -- bag underneath), then tilts the ripped bag past `pourAngleDeg` over
-    -- the pot to fill it. The soil prop rises from `soilStartZ` up to
-    -- `planting.rubbleSoilZ` as the fill progresses.
-    soiling = {
-        ripDistance       = 0.6,    -- accumulated normalised cursor travel needed to fully rip the bag
-        pourAngleDeg      = 60.0,   -- |pitch| past which soil pours into the pot
-        secondsPerFullBag = 3.0,    -- seconds of pouring (landing in pot) to fully fill from start to end Z
-        soilStartZ        = -0.35,  -- pickle_soil_01 Z offset (relative to plot centre) at 0% fill;
-                                    -- end Z reuses planting.rubbleSoilZ
-        cameraDistMul     = 1.4,
-    },
-
-    -- Interactive planting scene (modules/planting). Player tilts the
-    -- capsule to drop the seed, then converges 4 soil-rubble clumps from a
-    -- small ring around the pot centre to bury it. The same rubble model
-    -- is re-spawned by modules/grow/client and stays put for the rest of
-    -- the grow until the plant is harvested.
-    planting = {
-        seedItem      = "pickle_weed_seed", -- consumed when the seed is planted
-        rubble        = "pickle_soil_rubble_01",
-        rubbleCount     = 4,       -- evenly spaced around the soil ring
-        rubbleRadius    = 0.09,    -- spawn-ring radius from pot centre (metres)
-        rubbleConvergeK = 0.75,    -- 0..1: how far each clump slides toward centre during planting; the persistent pile uses the same residual `(1 - K) * rubbleRadius`
-        rubbleSoilZ     = 0.0,    -- absolute Z offset from plot centre where the rubble pile sits
-        seedZ           = 0.325,   -- Z offset for the buried seed on top of `rubbleSoilZ`
-        tiltDropDeg   = 165.0,     -- |roll| past this snaps to 180° and drops the seed
-        cameraDistMul = 1.4,
-    },
-
-    -- Total wall-clock from "seed planted" to "fully grown". Split evenly
-    -- across the pre-harvest growing stages (1..N-1).
-    totalGrowMs = 10 * 1000, -- 10 seconds total
-
-    -- Water reservoir. The plant holds up to `waterCapacityMs` of growing
-    -- time; it depletes by real time and growth pauses when it hits 0.
-    -- One full pitcher tops the reservoir to 100% (5 registered pours of
-    -- `pourPerPlot = 0.20` each). Falls back to totalGrowMs/3 if unset.
-    waterCapacityMs = 10 * 60 * 1000,
-
-    -- Growth stages (1-indexed). Stages 1..N-1 share `totalGrowMs`
-    -- evenly — stage 1 is the empty/germinating phase (no plant model
-    -- yet) and counts as a full growing stage. Stage N is the
-    -- harvestable end-cap (carries the buds config).
+    -- Growth stages (1-indexed). Stage 1 has no model (germinating);
+    -- the last stage carries the buds config (harvestable).
     stages = {
         { model = nil },
         { model = "pickle_weed_tree_01" },
@@ -297,63 +235,24 @@ Config.Drugs.weed = {
             },
         },
     },
-
-    -- Cutting scene parameters (consumed by modules/cutting).
-    cutting = {
-        tool     = "pickle_scissors_01",
-        toolBone = 28422, -- ped right hand
-        toolAnim = {
-            dict = "anim@amb@business@weed@weed_inspecting_lo_med_hi@",
-            clip = "weigh_v5_cuttingbuds_buyer",
-        },
-        camera      = { fov = 35.0, distanceMul = 1.0, heightOffset = 0.8 },
-        fadeMs      = 400,
-        fallMs      = 2000,
-        fallCarrier = "sf_prop_sf_apple_01a",
-        harvestItem = "pickle_weed_bud",
-    },
-
-    -- Watering scene parameters (consumed by modules/watering).
-    watering = {
-        pitcher       = "pickle_water_pot_01",
-        liquid        = "pickle_water_liquid_01",
-        liquidMaxZ    = 0.0,    -- liquid prop local Z at 100% full
-        liquidMinZ    = -0.11,  -- liquid prop local Z at 0% empty
-        pourAngleDeg  = 65.0,   -- pitcher pitch past which water pours
-        secondsPerFullPitcher = 4.0, -- seconds of continuous pouring to drain a full pitcher
-        pourPerPlot   = 0.20,   -- 0..1 poured onto a plot to register one server-side pour
-        cameraDistMul = 1.4,    -- framing pull-back for the watering scene
-        partFx        = { dict = "core", name = "ent_amb_pouring_water_into_pot" },
-        -- Looped fx played on the pot while a pour stream is landing in
-        -- it — visualises the water filling the pot. Optional.
-        potFx         = { dict = "core", name = "ent_amb_pouring_water_into_pot" },
-        potFxZ        = 0.25,   -- vertical offset of the pot fx on the pot
-    },
 }
 
 -- ─── Inventory ────────────────────────────────────────────────────────────
--- Fallback path for inventory item images. The active inventory bridge
--- usually exposes its own (e.g. ox_inventory ships images under
--- "nui://ox_inventory/web/images") — the bridge value wins; this kicks in
--- when nothing's wired up.
+-- Fallback path for item images; the active inventory bridge usually wins.
 Config.Inventory = {
     imagesPath = "nui://ox_inventory/web/images",
 }
 
--- Shared inventory items used across every drug's grow flow. Drug-specific
--- items (seeds, harvest output) live on the per-drug entry below. Set any
--- of these to false/nil to skip the corresponding inventory gate.
+-- Shared inventory items used across every grow flow. Set any to false/nil
+-- to skip the corresponding gate.
 Config.Items = {
     pot         = "pickle_pot",          -- consumed at plot placement
     soilBag     = "pickle_soil_bag",     -- consumed when soil is added
-    wateringCan = "pickle_watering_can", -- required (not consumed) to water
-    scissors    = "pickle_scissors",     -- required (not consumed) to cut buds
+    wateringCan = "pickle_watering_can", -- required to water
+    scissors    = "pickle_scissors",     -- required to cut buds
 }
 
 -- ─── Storage ──────────────────────────────────────────────────────────────
--- Player-placed lockers inside houses. Footprint is derived from each
--- model's bounding box at placement time, same as plots. Slots cap how
--- many distinct stacks the locker can hold.
 Config.Storage = {
     types = {
         small  = { label = "Small Locker",  model = "ch_prop_ch_service_locker_01b", slots = 10 },

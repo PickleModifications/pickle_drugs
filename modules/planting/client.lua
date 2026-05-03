@@ -49,10 +49,12 @@ local PLANT_CAPSULE_REST_Z = 0.5    -- metres above pot base; clears the
                                     -- rim when flipped upside-down so the
                                     -- seed can fall in.
 
-function GetPlantingCamPreset(spot, drugCfg)
+function GetPlantingCamPreset(spot, _drugCfg)
+    local sceneCfg = (Config.PlantScene and Config.PlantScene.planting) or {}
+    local cam = sceneCfg.camera or {}
+    local fov = cam.fov or 38.0
     local potHash = joaat("pickle_pot_01")
     local pMin, pMax = GetModelDimensions(potHash)
-    local fov = 38.0
     local center  = vector3(spot.coords.x, spot.coords.y, spot.coords.z)
     local heading = spot.coords.w or 0.0
 
@@ -65,17 +67,17 @@ function GetPlantingCamPreset(spot, drugCfg)
     local aspect = GetAspectRatio(false) or 1.777
     local fitH = (sceneH * 0.5) / math.tan(math.rad(fov) * 0.5)
     local fitW = (sceneW * 0.5) / math.tan(math.rad(fov) * 0.5) / aspect
-    local distance = math.max(fitH, fitW)
-        * ((drugCfg.planting and drugCfg.planting.cameraDistMul) or 1.0)
+    local distance = math.max(fitH, fitW) * (cam.distanceMul or 1.0)
 
     local rad = math.rad(heading)
     local camX = center.x + math.sin(rad) * distance
     local camY = center.y - math.cos(rad) * distance
-    local camZ = aimZ + 1.0
+    local camZ = aimZ + (cam.heightOffset or 1.0)
+    local lookZ = aimZ + (cam.lookOffset or 0.0)
 
     return {
         coords = vector3(camX, camY, camZ),
-        point  = vector3(center.x, center.y, aimZ),
+        point  = vector3(center.x, center.y, lookZ),
         fov    = fov,
     }
 end
@@ -91,8 +93,9 @@ local function CreatePlantingCam(center, heading, drugCfg)
     return cam, pose.fov
 end
 
-local function SpawnCapsuleTrio(drugCfg, anchor)
-    local c = drugCfg.capsule
+local function SpawnCapsuleTrio(_drugCfg, anchor)
+    local c = Config.PlantScene and Config.PlantScene.planting and Config.PlantScene.planting.capsule
+    if not c then return end
     local capsuleHash = LoadModel(c.capsule)
     local capHash     = LoadModel(c.cap)
     local seedHash    = LoadModel(c.seed)
@@ -163,8 +166,8 @@ local function RefreshCapProxy()
     SetEntityCoordsNoOffset(proxy, w.x, w.y, w.z, false, false, false)
 end
 
-local function SpawnRubbleRing(drugCfg, center)
-    local cfg = drugCfg.planting
+local function SpawnRubbleRing(_drugCfg, center)
+    local cfg = (Config.PlantScene and Config.PlantScene.planting) or {}
     local model = cfg.rubble
     if not model then return {} end
     local hash = LoadModel(model)
@@ -429,7 +432,7 @@ local function EnterSoilPhase()
     PlantState.seedProxy = nil
     if PlantState.seed and DoesEntityExist(PlantState.seed) then
         local zOff = PlantState.rubbleZOff or 0.0
-        local seedZ = (PlantState.drugCfg.planting and PlantState.drugCfg.planting.seedZ) or 0.0
+        local seedZ = (Config.PlantScene and Config.PlantScene.planting and Config.PlantScene.planting.seedZ) or 0.0
         SetEntityCoordsNoOffset(PlantState.seed,
             PlantState.plotCenter.x,
             PlantState.plotCenter.y,
@@ -524,7 +527,7 @@ local function TickRubbleAnims()
             -- closes to `rubbleConvergeK` of the way to centre — anything
             -- short of 1 leaves a residual ring so clumps pile against
             -- each other rather than stacking at a single point.
-            local k = (PlantState.drugCfg.planting and PlantState.drugCfg.planting.rubbleConvergeK) or 0.95
+            local k = (Config.PlantScene and Config.PlantScene.planting and Config.PlantScene.planting.rubbleConvergeK) or 0.95
             local x = anim.fromX + (PlantState.plotCenter.x - anim.fromX) * s * k
             local y = anim.fromY + (PlantState.plotCenter.y - anim.fromY) * s * k
             local z = anim.fromZ
@@ -583,7 +586,7 @@ local function RunPlantingThread()
             -- so the seed falls cleanly straight down rather than off at
             -- whatever odd angle the player happened to release at.
             if PlantState.phase == "tilt" then
-                local dropDeg = PlantState.drugCfg.planting.tiltDropDeg or 165.0
+                local dropDeg = (Config.PlantScene and Config.PlantScene.planting and Config.PlantScene.planting.tiltDropDeg) or 165.0
                 local roll = PlantState.tiltRoll or 0.0
                 if math.abs(roll) >= dropDeg then
                     PlantState.tiltRoll = (roll >= 0) and 180.0 or -180.0
@@ -651,7 +654,8 @@ function OpenPlantingScene(plotId, opts)
     local spot = GetPlotSpot(plotId)
     if not plot or not spot then return end
     local drugCfg = Config.Drugs[plot.drug]
-    if not drugCfg or not drugCfg.planting or not drugCfg.capsule then return end
+    local sceneCfg = Config.PlantScene and Config.PlantScene.planting
+    if not drugCfg or not sceneCfg or not sceneCfg.capsule then return end
     if (plot.stage_started_at or 0) ~= 0 then return end
 
     local center = vector3(spot.coords.x, spot.coords.y, spot.coords.z)

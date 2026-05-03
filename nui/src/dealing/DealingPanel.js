@@ -1,6 +1,6 @@
 import { jsxs as _jsxs, jsx as _jsx } from "react/jsx-runtime";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Plus, Trash2, Save, Pencil, MapPin, Edit3 } from "lucide-react";
+import { Plus, Trash2, Save, Pencil, MapPin, Edit3, Briefcase } from "lucide-react";
 import { fetchNui, useNuiEvent } from "@/lib/nui";
 import { WorldMap } from "./WorldMap";
 const DEFAULT_ZONE_COLOR = "#38bdf8";
@@ -22,6 +22,15 @@ const NEW_CUSTOMER = () => ({
     model: "a_m_m_business_01",
     zones: [],
     idle_scenario: "WORLD_HUMAN_SMOKING",
+});
+const NEW_DEALER = () => ({
+    id: "",
+    first_name: "Dealer",
+    last_name: "",
+    model: "g_m_y_lost_01",
+    zones: [],
+    hired: false,
+    cut_pct: 0.10,
 });
 const SCENARIOS = [
     "WORLD_HUMAN_SMOKING",
@@ -51,6 +60,9 @@ export function DealingPanel() {
     const [draftZone, setDraftZone] = useState(null);
     const [editingCustomerId, setEditingCustomerId] = useState(null);
     const [draftCustomer, setDraftCustomer] = useState(null);
+    const [dealers, setDealers] = useState([]);
+    const [editingDealerId, setEditingDealerId] = useState(null);
+    const [draftDealer, setDraftDealer] = useState(null);
     // Map click-mode: "edit" routes clicks into polygon vertex
     // authoring; "deal" routes them into deal-point placement
     // (rejected unless inside the polygon).
@@ -123,6 +135,38 @@ export function DealingPanel() {
     useNuiEvent("dealingCustomerRemoved", (id) => {
         setCustomers((prev) => prev.filter((x) => x.id !== id));
         setEditingCustomerId((s) => (s === id ? null : s));
+    });
+    // Dealer roster (admin view).
+    useEffect(() => {
+        (async () => {
+            const list = (await fetchNui("dealerListPublic", {}));
+            if (list)
+                setDealers(list);
+        })();
+    }, []);
+    useNuiEvent("dealerSlotUpdate", (s) => {
+        if (!s?.id)
+            return;
+        setDealers((prev) => {
+            const i = prev.findIndex((x) => x.id === s.id);
+            if (i < 0)
+                return [...prev, s];
+            const next = prev.slice();
+            next[i] = s;
+            return next;
+        });
+    });
+    useNuiEvent("dealerSlotRemoved", (id) => {
+        setDealers((prev) => prev.filter((x) => x.id !== id));
+        setEditingDealerId((s) => (s === id ? null : s));
+    });
+    useNuiEvent("dealerSlotSaved", (d) => {
+        if (!d)
+            return;
+        if (editingDealerId === "__new__" || editingDealerId === d.tempId) {
+            setEditingDealerId(d.savedId);
+            setDraftDealer((x) => (x ? { ...x, id: d.savedId } : x));
+        }
     });
     // Per-source ack from the server after a save. For brand-new
     // zones (tempId == "") it carries the assigned id so the editor
@@ -227,7 +271,33 @@ export function DealingPanel() {
         setDraftCustomer(null);
     };
     const deleteCustomer = (id) => fetchNui("dealingDeleteCustomer", { id });
-    return (_jsxs("div", { className: "h-full grid grid-cols-[220px_340px_1fr] gap-3 min-h-0 text-white", children: [_jsxs("div", { className: "min-h-0 flex flex-col gap-2", children: [_jsxs("div", { className: "flex items-center justify-between shrink-0", children: [_jsxs("span", { className: "text-xs text-white/85 font-medium", children: ["Zones ", _jsxs("span", { className: "text-white/45", children: ["\u00B7 ", zones.length] })] }), _jsxs("button", { onClick: startNewZone, className: "inline-flex items-center gap-1.5 px-2 py-1 rounded ring-1 ring-emerald-400/50 bg-emerald-500/15 text-emerald-100 hover:bg-emerald-500/30 text-[11px]", children: [_jsx(Plus, { className: "h-3 w-3" }), " New"] })] }), _jsxs("div", { className: "flex-1 overflow-y-auto pr-1 -mr-1 flex flex-col gap-1", children: [zones.length === 0 && (_jsx("div", { className: "text-[11px] italic text-white/40", children: "No zones yet." })), zones.map((z) => {
+    const dealersInSelected = useMemo(() => {
+        if (!selectedZone)
+            return dealers;
+        return dealers.filter((d) => d.zones.includes(selectedZone.id));
+    }, [dealers, selectedZone]);
+    const startEditingDealer = (d) => {
+        setEditingDealerId(d.id);
+        setDraftDealer({ ...d });
+    };
+    const startNewDealer = () => {
+        setEditingDealerId("__new__");
+        setDraftDealer(NEW_DEALER());
+    };
+    const saveDraftDealer = () => {
+        if (!draftDealer)
+            return;
+        fetchNui("dealerSave", draftDealer);
+        if (draftDealer.id) {
+            setEditingDealerId(null);
+            setDraftDealer(null);
+        }
+        // For brand-new dealers we keep the editor mounted; the
+        // dealerSlotSaved ack adopts the assigned id and lets the admin
+        // continue editing without losing context.
+    };
+    const deleteDealer = (id) => fetchNui("dealerDelete", { id });
+    return (_jsxs("div", { className: "h-full grid grid-cols-[220px_340px_1fr_1fr] gap-3 min-h-0 text-white", children: [_jsxs("div", { className: "min-h-0 flex flex-col gap-2", children: [_jsxs("div", { className: "flex items-center justify-between shrink-0", children: [_jsxs("span", { className: "text-xs text-white/85 font-medium", children: ["Zones ", _jsxs("span", { className: "text-white/45", children: ["\u00B7 ", zones.length] })] }), _jsxs("button", { onClick: startNewZone, className: "inline-flex items-center gap-1.5 px-2 py-1 rounded ring-1 ring-emerald-400/50 bg-emerald-500/15 text-emerald-100 hover:bg-emerald-500/30 text-[11px]", children: [_jsx(Plus, { className: "h-3 w-3" }), " New"] })] }), _jsxs("div", { className: "flex-1 overflow-y-auto pr-1 -mr-1 flex flex-col gap-1", children: [zones.length === 0 && (_jsx("div", { className: "text-[11px] italic text-white/40", children: "No zones yet." })), zones.map((z) => {
                                 const active = selectedZoneId === z.id;
                                 const cuCount = customers.filter((c) => c.zones.includes(z.id)).length;
                                 return (_jsxs("button", { onClick: () => startEditingZone(z), className: "text-left rounded px-2 py-1.5 ring-1 transition-colors " +
@@ -305,7 +375,13 @@ export function DealingPanel() {
                                     return (_jsx(CustomerEditor, { zones: zones, customer: draftCustomer, onChange: (patch) => setDraftCustomer((d) => ({ ...d, ...patch })), onSave: saveDraftCustomer, onCancel: () => { setDraftCustomer(null); setEditingCustomerId(null); }, onDelete: () => deleteCustomer(c.id) }, c.id));
                                 }
                                 return (_jsxs("button", { onClick: () => startEditingCustomer(c), className: "text-left rounded px-2 py-1.5 ring-1 ring-white/10 hover:bg-white/[0.04] flex items-center gap-2", children: [_jsxs("div", { className: "flex-1 min-w-0", children: [_jsxs("div", { className: "text-xs truncate", children: [c.first_name, " ", c.last_name] }), _jsxs("div", { className: "text-[10px] text-white/45 truncate", children: [c.model, " \u00B7 ", c.zones.length, " zone", c.zones.length === 1 ? "" : "s"] })] }), _jsx(Pencil, { className: "h-3 w-3 text-white/40" })] }, c.id));
-                            }), customersInSelected.length === 0 && editingCustomerId !== "__new__" && (_jsx("div", { className: "text-[11px] italic text-white/40", children: selectedZone ? "No customers assigned to this zone." : "No customers yet." }))] })] })] }));
+                            }), customersInSelected.length === 0 && editingCustomerId !== "__new__" && (_jsx("div", { className: "text-[11px] italic text-white/40", children: selectedZone ? "No customers assigned to this zone." : "No customers yet." }))] })] }), _jsxs("div", { className: "min-h-0 flex flex-col gap-2", children: [_jsxs("div", { className: "flex items-center justify-between shrink-0", children: [_jsxs("span", { className: "text-xs text-white/85 font-medium inline-flex items-center gap-1.5", children: [_jsx(Briefcase, { className: "h-3.5 w-3.5 text-amber-300" }), "Dealers ", _jsxs("span", { className: "text-white/45", children: ["\u00B7 ", dealersInSelected.length, dealersInSelected.length !== dealers.length ? ` of ${dealers.length}` : ""] })] }), _jsxs("button", { onClick: startNewDealer, className: "inline-flex items-center gap-1.5 px-2 py-1 rounded ring-1 ring-amber-400/50 bg-amber-500/15 text-amber-100 hover:bg-amber-500/30 text-[11px]", children: [_jsx(Plus, { className: "h-3 w-3" }), " New"] })] }), _jsxs("div", { className: "flex-1 overflow-y-auto pr-1 -mr-1 flex flex-col gap-1", children: [editingDealerId === "__new__" && draftDealer && (_jsx(DealerEditor, { zones: zones, dealer: draftDealer, onChange: (patch) => setDraftDealer((d) => ({ ...d, ...patch })), onSave: saveDraftDealer, onCancel: () => { setDraftDealer(null); setEditingDealerId(null); } })), dealersInSelected.map((d) => {
+                                const editing = editingDealerId === d.id && draftDealer;
+                                if (editing) {
+                                    return (_jsx(DealerEditor, { zones: zones, dealer: draftDealer, onChange: (patch) => setDraftDealer((x) => ({ ...x, ...patch })), onSave: saveDraftDealer, onCancel: () => { setDraftDealer(null); setEditingDealerId(null); }, onDelete: () => deleteDealer(d.id) }, d.id));
+                                }
+                                return (_jsxs("button", { onClick: () => startEditingDealer(d), className: "text-left rounded px-2 py-1.5 ring-1 ring-white/10 hover:bg-white/[0.04] flex items-center gap-2", children: [_jsxs("div", { className: "flex-1 min-w-0", children: [_jsxs("div", { className: "text-xs truncate", children: [d.first_name, " ", d.last_name, d.hired && (_jsx("span", { className: "ml-1.5 text-[9px] uppercase tracking-wider px-1 py-px rounded bg-emerald-500/20 ring-1 ring-emerald-400/40 text-emerald-200", children: "hired" }))] }), _jsxs("div", { className: "text-[10px] text-white/45 truncate", children: [d.model, " \u00B7 ", d.zones.length, " zone", d.zones.length === 1 ? "" : "s", " \u00B7 cut ", ((d.cut_pct ?? 0.10) * 100).toFixed(0), "%"] })] }), _jsx(Pencil, { className: "h-3 w-3 text-white/40" })] }, d.id));
+                            }), dealersInSelected.length === 0 && editingDealerId !== "__new__" && (_jsx("div", { className: "text-[11px] italic text-white/40", children: selectedZone ? "No dealers assigned to this zone." : "No dealer slots yet." }))] })] })] }));
 }
 function ZoneEditor({ zone, mapMode, onMapMode, saveStatus, onChange, onRemoveDealPoint, onCreate, onClose, onDelete, }) {
     const persisted = !!zone.id;
@@ -347,4 +423,18 @@ function CustomerEditor({ customer, zones, onChange, onSave, onCancel, onDelete,
                                     ? "bg-sky-500/25 ring-sky-400/60 text-sky-50"
                                     : "ring-white/15 text-white/55 hover:bg-white/[0.06]"), children: z.label }, z.id));
                     })] }), _jsxs("div", { className: "flex items-center justify-between gap-1.5 pt-1 border-t border-white/5", children: [onDelete ? (_jsxs("button", { onClick: onDelete, className: "inline-flex items-center gap-1 px-2 py-1 rounded ring-1 ring-red-400/40 text-red-200 hover:bg-red-500/15 text-[11px]", children: [_jsx(Trash2, { className: "h-3 w-3" }), " Delete"] })) : _jsx("span", {}), _jsxs("div", { className: "flex gap-1.5", children: [_jsx("button", { onClick: onCancel, className: "px-2 py-1 rounded ring-1 ring-white/15 text-white/60 hover:bg-white/[0.06] text-[11px]", children: "Cancel" }), _jsxs("button", { onClick: onSave, className: "inline-flex items-center gap-1 px-2 py-1 rounded ring-1 ring-emerald-400/50 bg-emerald-500/15 text-emerald-100 hover:bg-emerald-500/30 text-[11px]", children: [_jsx(Save, { className: "h-3 w-3" }), " Save"] })] })] })] }));
+}
+function DealerEditor({ dealer, zones, onChange, onSave, onCancel, onDelete, }) {
+    const persisted = !!dealer.id;
+    return (_jsxs("div", { className: "rounded ring-1 ring-amber-400/40 bg-amber-500/5 p-2 flex flex-col gap-1.5", children: [_jsxs("div", { className: "grid grid-cols-2 gap-1.5", children: [_jsx("input", { value: dealer.first_name, onChange: (e) => onChange({ first_name: e.target.value }), placeholder: "First", className: "bg-black/40 ring-1 ring-white/10 rounded px-1.5 py-1 text-xs" }), _jsx("input", { value: dealer.last_name, onChange: (e) => onChange({ last_name: e.target.value }), placeholder: "Last", className: "bg-black/40 ring-1 ring-white/10 rounded px-1.5 py-1 text-xs" })] }), _jsx("select", { value: dealer.model, onChange: (e) => onChange({ model: e.target.value }), className: "bg-black/40 ring-1 ring-white/10 rounded px-1.5 py-1 text-xs", children: MODELS.map((m) => _jsx("option", { value: m, children: m }, m)) }), _jsxs("label", { className: "flex items-center gap-1 bg-black/40 ring-1 ring-white/10 rounded px-1.5 py-1", children: [_jsx("span", { className: "text-white/45 text-[10px]", children: "Cut %" }), _jsx("input", { type: "number", min: 0, max: 100, value: Math.round(((dealer.cut_pct ?? 0.10) * 100)), onChange: (e) => onChange({ cut_pct: Math.max(0, Math.min(1, (parseInt(e.target.value) || 0) / 100)) }), className: "bg-transparent w-full outline-none text-xs tabular-nums" })] }), _jsx("div", { className: "text-[10px] text-white/55 mt-1", children: "Zones" }), _jsxs("div", { className: "flex flex-wrap gap-1 max-h-20 overflow-y-auto", children: [zones.length === 0 && (_jsx("span", { className: "text-[10px] italic text-white/35", children: "Create a zone first." })), zones.map((z) => {
+                        const on = dealer.zones.includes(z.id);
+                        return (_jsx("button", { onClick: () => onChange({
+                                zones: on
+                                    ? dealer.zones.filter((id) => id !== z.id)
+                                    : [...dealer.zones, z.id],
+                            }), className: "px-1.5 py-0.5 rounded text-[10px] ring-1 transition-colors " +
+                                (on
+                                    ? "bg-amber-500/25 ring-amber-400/60 text-amber-50"
+                                    : "ring-white/15 text-white/55 hover:bg-white/[0.06]"), children: z.label }, z.id));
+                    })] }), dealer.hired && (_jsx("div", { className: "text-[10px] text-emerald-300/80 italic", children: "Currently hired by a player." })), _jsxs("div", { className: "flex items-center justify-between gap-1.5 pt-1 border-t border-white/5", children: [onDelete ? (_jsxs("button", { onClick: onDelete, className: "inline-flex items-center gap-1 px-2 py-1 rounded ring-1 ring-red-400/40 text-red-200 hover:bg-red-500/15 text-[11px]", children: [_jsx(Trash2, { className: "h-3 w-3" }), " Delete"] })) : _jsx("span", {}), _jsxs("div", { className: "flex gap-1.5", children: [_jsx("button", { onClick: onCancel, className: "px-2 py-1 rounded ring-1 ring-white/15 text-white/60 hover:bg-white/[0.06] text-[11px]", children: "Cancel" }), _jsxs("button", { onClick: onSave, className: "inline-flex items-center gap-1 px-2 py-1 rounded ring-1 ring-amber-400/50 bg-amber-500/15 text-amber-100 hover:bg-amber-500/30 text-[11px]", children: [_jsx(Save, { className: "h-3 w-3" }), " ", persisted ? "Save" : "Create"] })] })] })] }));
 }

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { ChevronLeft, MessageSquare, Check, X, Handshake, type LucideIcon } from "lucide-react";
+import { ChevronLeft, MessageSquare, Check, X, Handshake, Phone as PhoneIcon, Briefcase, Package, type LucideIcon } from "lucide-react";
 
 import { fetchNui, useNuiEvent } from "@/lib/nui";
 
@@ -37,13 +37,38 @@ type MessagesPayload = {
     customers: Record<string, Customer>;
 };
 
+// Public dealer slot. `hired` means *some* player has hired it (not
+// necessarily us). `inventory` is only populated when the local player
+// owns the slot — the server scopes that field to the owner.
+type DealerSlot = {
+    id: string;
+    first_name: string;
+    last_name: string;
+    model: string;
+    zones: string[];
+    hired?: boolean;
+    inventory?: Record<string, number>;
+    cut_pct?: number;
+};
+
+type ThreadKey =
+    | { kind: "deal"; id: string }
+    | { kind: "dealer"; id: string };
+
 export function MessagesApp({ onBack }: { onBack: () => void }) {
     const [snapshot, setSnapshot] = useState<MessagesPayload>({
         deals: [], zones: {}, customers: {},
     });
-    const [openDealId, setOpenDealId] = useState<string | null>(null);
+    // Two stores so we can tell "my owned slot" apart from "public slot
+    // someone else hired" — the latter is hidden from the inbox so the
+    // list only shows actionable threads.
+    const [publicDealers, setPublicDealers] = useState<Record<string, DealerSlot>>({});
+    const [ownedDealers, setOwnedDealers]   = useState<Record<string, DealerSlot>>({});
+    // slotId → true when a meetup is currently scheduled. Pushed live by
+    // the dealers client whenever a summoned ped is created/destroyed.
+    const [summoned, setSummoned] = useState<Record<string, boolean>>({});
+    const [openThread, setOpenThread] = useState<ThreadKey | null>(null);
 
-    // Initial fetch — subsequent updates come via dealingMessages pushes.
     useEffect(() => {
         let cancelled = false;
         (async () => {
@@ -53,35 +78,103 @@ export function MessagesApp({ onBack }: { onBack: () => void }) {
             if (cancelled || !data) return;
             setSnapshot(data);
         })();
+        (async () => {
+            const pub = (await fetchNui("dealerListPublic", {})) as DealerSlot[] | undefined;
+            if (pub && !cancelled) setPublicDealers(Object.fromEntries(pub.map((s) => [s.id, s])));
+            const mine = (await fetchNui("dealerListMine", {})) as DealerSlot[] | undefined;
+            if (mine && !cancelled) setOwnedDealers(Object.fromEntries(mine.map((s) => [s.id, s])));
+            const states = (await fetchNui("dealerSummonStates", {})) as string[] | undefined;
+            if (states && !cancelled) {
+                setSummoned(Object.fromEntries(states.map((id) => [id, true])));
+            }
+        })();
         return () => { cancelled = true; };
     }, []);
 
     useNuiEvent<MessagesPayload>("dealingMessages", (d) => { if (d) setSnapshot(d); });
+    useNuiEvent<DealerSlot>("dealerSlotUpdate", (s) => {
+        if (!s?.id) return;
+        setPublicDealers((p) => ({ ...p, [s.id]: s }));
+    });
+    useNuiEvent<string>("dealerSlotRemoved", (id) => {
+        if (!id) return;
+        setPublicDealers((p) => { const n = { ...p }; delete n[id]; return n; });
+        setOwnedDealers((p) => { const n = { ...p }; delete n[id]; return n; });
+        setOpenThread((t) => (t && t.kind === "dealer" && t.id === id ? null : t));
+    });
+    useNuiEvent<DealerSlot>("dealerOwnerUpdate", (s) => {
+        if (!s?.id) return;
+        setOwnedDealers((p) => ({ ...p, [s.id]: s }));
+    });
+    useNuiEvent<string>("dealerOwnerRemoved", (id) => {
+        if (!id) return;
+        setOwnedDealers((p) => { const n = { ...p }; delete n[id]; return n; });
+    });
+    useNuiEvent<{ id: string; summoned: boolean }>("dealerSummonState", (d) => {
+        if (!d?.id) return;
+        setSummoned((p) => {
+            if (d.summoned) return { ...p, [d.id]: true };
+            const n = { ...p }; delete n[d.id]; return n;
+        });
+    });
 
     const deals = useMemo(
         () => [...snapshot.deals].sort((a, b) => b.created_at - a.created_at),
         [snapshot.deals],
     );
-    const openDeal = openDealId ? deals.find((d) => d.id === openDealId) : null;
+
+    // Visible threads = (a) every dealer I own, (b) every unhired dealer.
+    // Dealers hired by other players are hidden — the inbox is for
+    // actionable threads only.
+    const dealerList = useMemo(() => {
+        const out: DealerSlot[] = [];
+        const seen: Record<string, true> = {};
+        for (const s of Object.values(ownedDealers)) {
+            out.push(s);
+            seen[s.id] = true;
+        }
+        for (const s of Object.values(publicDealers)) {
+            if (seen[s.id]) continue;
+            if (!s.hired) out.push(s);
+        }
+        out.sort((a, b) => `${a.first_name} ${a.last_name}`.localeCompare(`${b.first_name} ${b.last_name}`));
+        return out;
+    }, [publicDealers, ownedDealers]);
+
+    const openDeal = openThread?.kind === "deal" ? deals.find((d) => d.id === openThread.id) : null;
+    const openDealerSlot: DealerSlot | null = openThread?.kind === "dealer"
+        ? (ownedDealers[openThread.id] ?? publicDealers[openThread.id] ?? null)
+        : null;
+    const openDealerIsMine = openDealerSlot ? !!ownedDealers[openDealerSlot.id] : false;
+
+    // Resolve a dealer's zone-id list into the labels stored in
+    // snapshot.zones. Unknown ids fall back to a short "?<id>" tag so a
+    // mid-edit zone delete is still visible (vs silently dropped).
+    const zoneLabelsFor = (ids: string[]): string[] =>
+        ids.map((id) => snapshot.zones[id]?.label ?? `?${id.slice(0, 6)}`);
 
     const customerName = (cid: string) => {
         const c = snapshot.customers[cid];
         return c ? `${c.first_name} ${c.last_name}`.trim() : "Customer";
     };
 
+    const headerTitle = openDeal
+        ? customerName(openDeal.customer_id)
+        : openDealerSlot
+            ? `${openDealerSlot.first_name} ${openDealerSlot.last_name}`.trim()
+            : "Messages";
+
     return (
         <div className="absolute inset-0 flex flex-col bg-gradient-to-b from-zinc-900 to-zinc-950 text-white pt-6 pb-5">
             <div className="grid grid-cols-[1fr_auto_1fr] items-center px-3 pt-2 pb-3 border-b border-white/5">
                 <button
-                    onClick={openDeal ? () => setOpenDealId(null) : onBack}
+                    onClick={openThread ? () => setOpenThread(null) : onBack}
                     className="flex items-center gap-1 text-amber-400 active:text-amber-300 active:scale-95 transition-transform justify-self-start"
                 >
                     <ChevronLeft className="w-5 h-5" strokeWidth={2.5} />
-                    <span className="text-[13px]">{openDeal ? "Inbox" : "Home"}</span>
+                    <span className="text-[13px]">{openThread ? "Inbox" : "Home"}</span>
                 </button>
-                <div className="text-[13px] font-semibold truncate">
-                    {openDeal ? customerName(openDeal.customer_id) : "Messages"}
-                </div>
+                <div className="text-[13px] font-semibold truncate">{headerTitle}</div>
                 <div aria-hidden />
             </div>
 
@@ -91,18 +184,80 @@ export function MessagesApp({ onBack }: { onBack: () => void }) {
                     customerName={customerName(openDeal.customer_id)}
                     zoneLabel={snapshot.zones[openDeal.zone_id]?.label ?? "Unknown zone"}
                 />
+            ) : openDealerSlot ? (
+                openDealerIsMine
+                    ? <DealerConversation dealer={openDealerSlot} zoneLabels={zoneLabelsFor(openDealerSlot.zones)} summoned={!!summoned[openDealerSlot.id]} />
+                    : <HireDealerPrompt dealer={openDealerSlot} zoneLabels={zoneLabelsFor(openDealerSlot.zones)} />
             ) : (
                 <div className="phone-scroll flex-1 overflow-y-auto">
-                    {deals.length === 0 ? (
+                    {dealerList.length > 0 && (
+                        <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider text-white/35 bg-white/[0.02]">
+                            Dealers
+                        </div>
+                    )}
+                    {dealerList.map((d) => {
+                        const mine = !!ownedDealers[d.id];
+                        const stock = mine
+                            ? Object.values(d.inventory ?? {}).reduce((a, n) => a + (Number(n) || 0), 0)
+                            : 0;
+                        return (
+                            <button
+                                key={d.id}
+                                onClick={() => setOpenThread({ kind: "dealer", id: d.id })}
+                                className="w-full text-left px-3 py-2.5 border-b border-white/5 hover:bg-white/[0.03] active:bg-white/[0.06] flex items-start gap-2"
+                            >
+                                <div className={
+                                    "flex-none w-8 h-8 rounded-full ring-1 ring-white/15 flex items-center justify-center " +
+                                    (mine
+                                        ? "bg-gradient-to-br from-emerald-400 to-emerald-600"
+                                        : "bg-gradient-to-br from-zinc-500 to-zinc-700")
+                                }>
+                                    <Briefcase className="w-4 h-4 text-white" />
+                                </div>
+                                <div className="min-w-0 flex-1">
+                                    <div className="flex items-baseline gap-2">
+                                        <span className="text-[13px] font-semibold truncate">
+                                            {d.first_name} {d.last_name}
+                                        </span>
+                                        {mine ? (
+                                            <span className="ml-auto text-[10px] text-white/35 tabular-nums inline-flex items-center gap-1">
+                                                <Package className="w-3 h-3" />{stock}
+                                            </span>
+                                        ) : (
+                                            <span className="ml-auto text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-200 ring-1 ring-amber-400/40">
+                                                Available
+                                            </span>
+                                        )}
+                                    </div>
+                                    <div className="text-[11px] text-white/55 truncate">
+                                        {mine
+                                            ? (stock > 0
+                                                ? `Carrying ${stock} item${stock === 1 ? "" : "s"}.`
+                                                : "Standing by — give me product to start dealing.")
+                                            : (d.zones.length > 0
+                                                ? `Looking for work · ${zoneLabelsFor(d.zones).join(", ")}`
+                                                : "Looking for work · no zones assigned")}
+                                    </div>
+                                </div>
+                            </button>
+                        );
+                    })}
+
+                    {deals.length > 0 && (
+                        <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider text-white/35 bg-white/[0.02]">
+                            Customers
+                        </div>
+                    )}
+                    {dealerList.length === 0 && deals.length === 0 ? (
                         <div className="px-3 py-12 text-center text-[12px] text-white/40">
                             <MessageSquare className="w-8 h-8 mx-auto mb-2 opacity-50" />
-                            No messages yet. Hold some product and someone will reach out.
+                            No messages yet. Hire a dealer or hold some product and someone will reach out.
                         </div>
                     ) : (
                         deals.map((d, i) => (
                             <button
                                 key={d.id}
-                                onClick={() => setOpenDealId(d.id)}
+                                onClick={() => setOpenThread({ kind: "deal", id: d.id })}
                                 className="w-full text-left px-3 py-2.5 border-b border-white/5 hover:bg-white/[0.03] active:bg-white/[0.06] flex items-start gap-2 animate-in fade-in slide-in-from-bottom-1 fill-mode-both"
                                 style={{ animationDelay: `${i * 25}ms` }}
                             >
@@ -128,6 +283,78 @@ export function MessagesApp({ onBack }: { onBack: () => void }) {
                     )}
                 </div>
             )}
+        </div>
+    );
+}
+
+function HireDealerPrompt({ dealer, zoneLabels }: { dealer: DealerSlot; zoneLabels: string[] }) {
+    const cut = Math.round((dealer.cut_pct ?? 0.10) * 100);
+    return (
+        <div className="phone-scroll flex-1 overflow-y-auto px-3 py-3 flex flex-col gap-2">
+            <Bubble side="them" name={`${dealer.first_name} ${dealer.last_name}`}>
+                Heard you need a hand. I work {zoneLabels.length > 0
+                    ? <>around <b>{zoneLabels.join(", ")}</b></>
+                    : "wherever you point me"}. I'll close any deal that comes through while you stay clean.
+            </Bubble>
+            <Bubble side="them" name={`${dealer.first_name}`}>
+                I take a <b>{cut}%</b> cut. The rest is yours.
+            </Bubble>
+            <div className="mt-auto pt-2 sticky bottom-0">
+                <button
+                    onClick={() => fetchNui("dealerHire", { id: dealer.id })}
+                    className="w-full inline-flex items-center justify-center gap-1.5 rounded-md bg-amber-500/30 ring-1 ring-amber-400/60 text-amber-50 py-2 text-[13px] font-semibold active:scale-[0.98] transition-transform"
+                >
+                    <Handshake className="w-4 h-4" /> Hire {dealer.first_name}
+                </button>
+            </div>
+        </div>
+    );
+}
+
+function DealerConversation({ dealer, zoneLabels, summoned }: { dealer: DealerSlot; zoneLabels: string[]; summoned: boolean }) {
+    const stock = Object.entries(dealer.inventory ?? {}).filter(([, n]) => (Number(n) || 0) > 0);
+    const total = stock.reduce((a, [, n]) => a + (Number(n) || 0), 0);
+
+    return (
+        <div className="phone-scroll flex-1 overflow-y-auto px-3 py-3 flex flex-col gap-2">
+            <Bubble side="them" name={`${dealer.first_name} ${dealer.last_name}`}>
+                On call. I'll handle anyone who hits up {zoneLabels.length > 0
+                    ? <b>{zoneLabels.join(", ")}</b>
+                    : "the zones you assign me"} for you.
+            </Bubble>
+            {total > 0 ? (
+                <Bubble side="them" name={`${dealer.first_name}`}>
+                    Carrying:
+                    <ul className="mt-1 ml-3 list-disc">
+                        {stock.map(([item, n]) => (
+                            <li key={item} className="tabular-nums">
+                                {item} <span className="text-white/55">× {n}</span>
+                            </li>
+                        ))}
+                    </ul>
+                </Bubble>
+            ) : (
+                <Bubble side="them" name={`${dealer.first_name}`}>
+                    I'm out of product. Summon me and hand some over.
+                </Bubble>
+            )}
+            <div className="mt-auto pt-2 sticky bottom-0">
+                {summoned ? (
+                    <button
+                        onClick={() => fetchNui("dealerCancelSummon", { id: dealer.id })}
+                        className="w-full inline-flex items-center justify-center gap-1.5 rounded-md bg-rose-500/25 ring-1 ring-rose-400/60 text-rose-50 py-2 text-[13px] font-semibold active:scale-[0.98] transition-transform"
+                    >
+                        <X className="w-4 h-4" /> Cancel Meetup
+                    </button>
+                ) : (
+                    <button
+                        onClick={() => fetchNui("dealerSummon", { id: dealer.id })}
+                        className="w-full inline-flex items-center justify-center gap-1.5 rounded-md bg-emerald-500/25 ring-1 ring-emerald-400/60 text-emerald-50 py-2 text-[13px] font-semibold active:scale-[0.98] transition-transform"
+                    >
+                        <PhoneIcon className="w-4 h-4" /> Schedule Meetup
+                    </button>
+                )}
+            </div>
         </div>
     );
 }

@@ -1,14 +1,12 @@
 import { jsx as _jsx, jsxs as _jsxs, Fragment as _Fragment } from "react/jsx-runtime";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, Droplet, Eye, Leaf, Mountain, Move, Scissors, Sprout, Trash2, X, } from "lucide-react";
+import { ChevronDown, Droplet, Leaf, Mountain, Move, Package, Scissors, Settings as SettingsIcon, Sprout, Trash2, X, } from "lucide-react";
 import { fetchNui, useNuiEvent } from "@/lib/nui";
 import { CreatorPanel } from "./CreatorPanel";
-import { EmployeesPanel } from "./EmployeesPanel";
-import { AssignerPanel } from "./AssignerPanel";
-import { EmployeeInfoPanel } from "./EmployeeInfoPanel";
 import { HousingPanel } from "./HousingPanel";
 import { HouseManagePanel } from "./HouseManagePanel";
 import { HousePlacementHud } from "./HousePlacementHud";
+import { WorkerPickerHud } from "./WorkerPickerHud";
 import { StoragePanel } from "./StoragePanel";
 import { ZonePickerHud } from "./ZonePickerHud";
 import { Phone } from "./phone/Phone";
@@ -75,9 +73,10 @@ const ICON_MAP = {
     sprout: Sprout,
     droplet: Droplet,
     scissors: Scissors,
-    eye: Eye,
     move: Move,
     trash: Trash2,
+    package: Package,
+    gear: SettingsIcon,
 };
 function ActionIcon({ name, className }) {
     const Comp = ICON_MAP[name] ?? Sprout;
@@ -104,10 +103,6 @@ const TONES = {
         hover: "hover:bg-fuchsia-500/25 hover:ring-fuchsia-400/70 hover:text-fuchsia-50 hover:shadow-[0_0_14px_-6px_rgba(232,121,249,0.7)]",
         active: "bg-fuchsia-500/30 ring-fuchsia-400/70 text-fuchsia-50 shadow-[0_0_18px_-6px_rgba(232,121,249,0.75)]",
     },
-    inspect: {
-        hover: "hover:bg-violet-500/25 hover:ring-violet-400/70 hover:text-violet-50 hover:shadow-[0_0_14px_-6px_rgba(167,139,250,0.7)]",
-        active: "bg-violet-500/30 ring-violet-400/70 text-violet-50 shadow-[0_0_18px_-6px_rgba(167,139,250,0.75)]",
-    },
     move: {
         hover: "hover:bg-amber-500/25 hover:ring-amber-400/70 hover:text-amber-50 hover:shadow-[0_0_14px_-6px_rgba(251,191,36,0.7)]",
         active: "bg-amber-500/30 ring-amber-400/70 text-amber-50 shadow-[0_0_18px_-6px_rgba(251,191,36,0.75)]",
@@ -115,6 +110,10 @@ const TONES = {
     remove: {
         hover: "hover:bg-red-500/25 hover:ring-red-400/70 hover:text-red-50 hover:shadow-[0_0_14px_-6px_rgba(248,113,113,0.7)]",
         active: "bg-red-500/30 ring-red-400/70 text-red-50 shadow-[0_0_18px_-6px_rgba(248,113,113,0.75)]",
+    },
+    output: {
+        hover: "hover:bg-cyan-500/25 hover:ring-cyan-400/70 hover:text-cyan-50 hover:shadow-[0_0_14px_-6px_rgba(34,211,238,0.7)]",
+        active: "bg-cyan-500/30 ring-cyan-400/70 text-cyan-50 shadow-[0_0_18px_-6px_rgba(34,211,238,0.75)]",
     },
     menu: { hover: "", active: "" },
 };
@@ -136,17 +135,36 @@ function StatusSection({ status }) {
 // ─── Actions section ─────────────────────────────────────────────────────
 function ActionsSection({ actions, activeAction, onSelect, onCancelAction, onClose, }) {
     const inAction = activeAction !== "menu";
-    return (_jsxs("div", { className: "px-3 py-3 flex items-center gap-2", children: [_jsx("div", { className: "flex items-center gap-1.5", children: actions.map((a) => {
-                    const isActive = activeAction === a.id;
-                    const disabled = !a.available || (inAction && !isActive);
-                    const tone = TONES[a.id] ?? TONES.menu;
-                    return (_jsxs("button", { disabled: disabled, onClick: () => isActive ? onCancelAction() : onSelect(a.id), title: a.reason ?? a.label, className: "group relative flex flex-col items-center justify-center gap-1 rounded-lg px-3 py-2 min-w-[68px] ring-1 transition-all " +
-                            (isActive
-                                ? tone.active + " "
-                                : disabled
-                                    ? "text-white/25 cursor-not-allowed bg-white/[0.02] ring-white/20 "
-                                    : NEUTRAL_ENABLED + tone.hover + " "), children: [_jsx(ActionIcon, { name: a.icon, className: "h-5 w-5" }), _jsx("span", { className: "text-[10px] font-medium leading-none", children: a.label }), !a.available && a.reason && (_jsx("span", { className: "absolute -top-7 left-1/2 -translate-x-1/2 text-[10px] text-white/70 bg-black/80 px-2 py-0.5 rounded whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none ring-1 ring-white/10", children: a.reason }))] }, a.id));
-                }) }), _jsx("div", { className: "h-10 w-px bg-white/10 mx-1" }), inAction ? (_jsxs("button", { onClick: onCancelAction, className: "flex flex-col items-center justify-center gap-1 rounded-lg px-3 py-2 min-w-[68px] bg-amber-500/15 ring-1 ring-amber-400/50 text-amber-200 hover:bg-amber-500/25 hover:ring-amber-400/70 transition-colors", title: "Back to menu", children: [_jsx(ChevronDown, { className: "h-5 w-5 rotate-90" }), _jsx("span", { className: "text-[10px] font-medium leading-none", children: "Back" })] })) : (_jsxs("button", { onClick: onClose, className: "flex flex-col items-center justify-center gap-1 rounded-lg px-3 py-2 min-w-[68px] bg-white/[0.06] ring-1 ring-white/30 text-white/80 hover:bg-red-500/20 hover:text-red-100 hover:ring-red-400/60 transition-colors", title: "Close", children: [_jsx(X, { className: "h-5 w-5" }), _jsx("span", { className: "text-[10px] font-medium leading-none", children: "Close" })] }))] }));
+    const mainActions = actions.filter((a) => !a.settings);
+    const settingsActions = actions.filter((a) => a.settings);
+    const [settingsOpen, setSettingsOpen] = useState(false);
+    // Close the popover whenever the player drops into a sub-action so
+    // the floating menu doesn't linger over the active scene.
+    useEffect(() => {
+        if (inAction)
+            setSettingsOpen(false);
+    }, [inAction]);
+    const renderActionButton = (a) => {
+        const isActive = activeAction === a.id;
+        const disabled = !a.available || (inAction && !isActive);
+        const tone = TONES[a.id] ?? TONES.menu;
+        return (_jsxs("button", { disabled: disabled, onClick: () => {
+                setSettingsOpen(false);
+                isActive ? onCancelAction() : onSelect(a.id);
+            }, title: a.reason ?? a.label, className: "group relative flex flex-col items-center justify-center gap-1 rounded-lg px-3 py-2 min-w-[68px] ring-1 transition-all " +
+                (isActive
+                    ? tone.active + " "
+                    : disabled
+                        ? "text-white/25 cursor-not-allowed bg-white/[0.02] ring-white/20 "
+                        : NEUTRAL_ENABLED + tone.hover + " "), children: [_jsx(ActionIcon, { name: a.icon, className: "h-5 w-5" }), _jsx("span", { className: "text-[10px] font-medium leading-none", children: a.label }), !a.available && a.reason && (_jsx("span", { className: "absolute -top-7 left-1/2 -translate-x-1/2 text-[10px] text-white/70 bg-black/80 px-2 py-0.5 rounded whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none ring-1 ring-white/10", children: a.reason }))] }, a.id));
+    };
+    const settingsDisabled = inAction || settingsActions.length === 0;
+    return (_jsxs("div", { className: "px-3 py-3 flex items-center gap-2", children: [_jsxs("div", { className: "flex items-center gap-1.5", children: [mainActions.map(renderActionButton), settingsActions.length > 0 && (_jsxs("div", { className: "relative", children: [_jsxs("button", { disabled: settingsDisabled, onClick: () => setSettingsOpen((o) => !o), title: "Settings", className: "flex flex-col items-center justify-center gap-1 rounded-lg px-3 py-2 min-w-[68px] ring-1 transition-all " +
+                                    (settingsDisabled
+                                        ? "text-white/25 cursor-not-allowed bg-white/[0.02] ring-white/20 "
+                                        : settingsOpen
+                                            ? "bg-white/[0.12] ring-white/40 text-white "
+                                            : NEUTRAL_ENABLED + "hover:bg-white/[0.10] hover:ring-white/40 "), children: [_jsx(ActionIcon, { name: "gear", className: "h-5 w-5" }), _jsx("span", { className: "text-[10px] font-medium leading-none", children: "Settings" })] }), settingsOpen && (_jsx("div", { className: "absolute left-1/2 -translate-x-1/2 bottom-[calc(100%+8px)] z-10 rounded-xl bg-black/95 ring-1 ring-white/15 shadow-2xl p-2 flex items-center gap-1.5", children: settingsActions.map(renderActionButton) }))] }))] }), _jsx("div", { className: "h-10 w-px bg-white/10 mx-1" }), inAction ? (_jsxs("button", { onClick: onCancelAction, className: "flex flex-col items-center justify-center gap-1 rounded-lg px-3 py-2 min-w-[68px] bg-amber-500/15 ring-1 ring-amber-400/50 text-amber-200 hover:bg-amber-500/25 hover:ring-amber-400/70 transition-colors", title: "Back to menu", children: [_jsx(ChevronDown, { className: "h-5 w-5 rotate-90" }), _jsx("span", { className: "text-[10px] font-medium leading-none", children: "Back" })] })) : (_jsxs("button", { onClick: onClose, className: "flex flex-col items-center justify-center gap-1 rounded-lg px-3 py-2 min-w-[68px] bg-white/[0.06] ring-1 ring-white/30 text-white/80 hover:bg-red-500/20 hover:text-red-100 hover:ring-red-400/60 transition-colors", title: "Close", children: [_jsx(X, { className: "h-5 w-5" }), _jsx("span", { className: "text-[10px] font-medium leading-none", children: "Close" })] }))] }));
 }
 // ─── Action hint ─────────────────────────────────────────────────────────
 function ActionHintInline({ activeAction }) {
@@ -165,9 +183,6 @@ function ActionHintInline({ activeAction }) {
     }
     else if (activeAction === "planting") {
         content = (_jsxs(_Fragment, { children: ["Click the cap to pop it \u00B7 grab the capsule and tilt with", " ", _jsx(Kbd, { children: "A" }), " / ", _jsx(Kbd, { children: "D" }), " to drop the seed \u00B7 click each rubble pile to bury"] }));
-    }
-    else if (activeAction === "inspect") {
-        content = (_jsxs(_Fragment, { children: ["Inspecting your plant \u2014 press ", _jsx(Kbd, { children: "Esc" }), " or Back to return"] }));
     }
     return (_jsx("span", { className: "text-[11px] text-white/80 truncate", children: content }));
 }
@@ -193,16 +208,6 @@ function App() {
     const [creatorPlots, setCreatorPlots] = useState([]);
     const [creatorHidden, setCreatorHidden] = useState(false);
     const [gizmoHelp, setGizmoHelp] = useState(null);
-    // Employees roster surface
-    const [employeesOpen, setEmployeesOpen] = useState(false);
-    const [employeesHidden, setEmployeesHidden] = useState(false);
-    const [employeesList, setEmployeesList] = useState([]);
-    // Plot assigner surface
-    const [assignerOpen, setAssignerOpen] = useState(false);
-    const [assignerData, setAssignerData] = useState(null);
-    // Employee info popup
-    const [empInfoOpen, setEmpInfoOpen] = useState(false);
-    const [empInfoData, setEmpInfoData] = useState(null);
     // Housing admin
     const [housingOpen, setHousingOpen] = useState(false);
     const [housingHidden, setHousingHidden] = useState(false);
@@ -210,9 +215,11 @@ function App() {
     const [housingInitial, setHousingInitial] = useState({ interiors: [], houses: [] });
     // Player house management
     const [houseManageOpen, setHouseManageOpen] = useState(false);
+    const [houseManageHidden, setHouseManageHidden] = useState(false);
     const [houseManageData, setHouseManageData] = useState(null);
     // Placement HUD
     const [placementHud, setPlacementHud] = useState(null);
+    const [workerPickerHud, setWorkerPickerHud] = useState(null);
     // Storage locker panel
     const [storageData, setStorageData] = useState(null);
     // Zone picker HUD (admin in-world zone bounds picker)
@@ -265,45 +272,6 @@ function App() {
             });
         }
     });
-    // Employees roster
-    useNuiEvent("openEmployees", (data) => {
-        setEmployeesList(data?.employees ?? []);
-        setEmployeesHidden(false);
-        setEmployeesOpen(true);
-    });
-    useNuiEvent("closeEmployees", () => setEmployeesOpen(false));
-    useNuiEvent("employeesList", (data) => {
-        if (data?.employees)
-            setEmployeesList(data.employees);
-    });
-    useNuiEvent("employeesMinimize", () => setEmployeesHidden(true));
-    useNuiEvent("employeesRestore", (data) => {
-        setEmployeesHidden(false);
-        if (data?.employees)
-            setEmployeesList(data.employees);
-    });
-    // Assigner
-    useNuiEvent("openAssigner", (data) => {
-        if (!data)
-            return;
-        setAssignerData(data);
-        setAssignerOpen(true);
-    });
-    useNuiEvent("closeAssigner", () => {
-        setAssignerOpen(false);
-        setAssignerData(null);
-    });
-    // Employee info popup
-    useNuiEvent("openEmployeeInfo", (data) => {
-        if (!data?.employee)
-            return;
-        setEmpInfoData(data.employee);
-        setEmpInfoOpen(true);
-    });
-    useNuiEvent("closeEmployeeInfo", () => {
-        setEmpInfoOpen(false);
-        setEmpInfoData(null);
-    });
     // Housing admin events
     useNuiEvent("openHousing", (data) => {
         if (!data)
@@ -325,15 +293,25 @@ function App() {
         if (!data)
             return;
         setHouseManageData(data);
+        setHouseManageHidden(false);
         setHouseManageOpen(true);
     });
     useNuiEvent("closeHouseManage", () => {
         setHouseManageOpen(false);
         setHouseManageData(null);
+        setHouseManageHidden(false);
     });
+    // Mid-flow visibility toggle. While a placement / move flow is running
+    // we hide the panel (instead of unmounting it) so it pops back into
+    // the same tab/state when the placement completes.
+    useNuiEvent("houseManageMinimize", () => setHouseManageHidden(true));
+    useNuiEvent("houseManageRestore", () => setHouseManageHidden(false));
     // Placement HUD
     useNuiEvent("openPlacementHud", (data) => setPlacementHud(data ?? null));
     useNuiEvent("closePlacementHud", () => setPlacementHud(null));
+    // Worker plot-picker HUD (raycast pick a plot to assign to a worker)
+    useNuiEvent("openWorkerPickerHud", (data) => setWorkerPickerHud(data ?? null));
+    useNuiEvent("closeWorkerPickerHud", () => setWorkerPickerHud(null));
     // Storage locker panel
     useNuiEvent("openStoragePanel", (data) => setStorageData(data ?? null));
     useNuiEvent("closeStoragePanel", () => setStorageData(null));
@@ -379,7 +357,7 @@ function App() {
     }, [open]);
     const activeAction = status?.activeAction ?? "menu";
     useEffect(() => {
-        if (!open || activeAction === "menu" || activeAction === "inspect")
+        if (!open || activeAction === "menu")
             return;
         const tick = window.setInterval(() => {
             const payload = {
@@ -464,14 +442,12 @@ function App() {
     const actions = useMemo(() => status?.actions ?? [], [status?.actions]);
     const anyOpen = open ||
         creatorOpen ||
-        employeesOpen ||
-        assignerOpen ||
-        empInfoOpen ||
         housingOpen ||
         houseManageOpen ||
         phoneOpen ||
         !!storageData ||
         !!placementHud ||
+        !!workerPickerHud ||
         !!zonePickerHud ||
         !!gizmoHelp;
     // The DealsHud is a true HUD: present whenever the player has any
@@ -494,7 +470,7 @@ function App() {
             return (_jsxs(_Fragment, { children: [_jsx(HousingPanel, { initial: housingInitial, panel: housingPanel, hidden: housingHidden, onClose: () => fetchNui("housingClose") }), gizmoHelp && _jsx(GizmoHelpBar, { ...gizmoHelp }), zonePickerHud && _jsx(ZonePickerHud, { data: zonePickerHud })] }));
         }
         if (houseManageOpen && houseManageData && !open) {
-            return (_jsx(HouseManagePanel, { data: houseManageData, onClose: () => fetchNui("houseManageClose") }));
+            return (_jsxs(_Fragment, { children: [_jsx(HouseManagePanel, { data: houseManageData, hidden: houseManageHidden, onClose: () => fetchNui("houseManageClose") }), placementHud && _jsx(HousePlacementHud, { data: placementHud }), workerPickerHud && _jsx(WorkerPickerHud, { data: workerPickerHud })] }));
         }
         if (storageData && !open) {
             return (_jsx(StoragePanel, { data: storageData, onClose: () => fetchNui("storageClose") }));
@@ -502,25 +478,19 @@ function App() {
         if (placementHud && !open) {
             return _jsx(HousePlacementHud, { data: placementHud });
         }
+        if (workerPickerHud && !open) {
+            return _jsx(WorkerPickerHud, { data: workerPickerHud });
+        }
         if (zonePickerHud && !open) {
             return _jsx(ZonePickerHud, { data: zonePickerHud });
         }
         if (creatorOpen && !open) {
             return (_jsxs(_Fragment, { children: [_jsx(CreatorPanel, { drugs: creatorDrugs, plots: creatorPlots, hidden: creatorHidden, onClose: () => fetchNui("creatorClose") }), gizmoHelp && _jsx(GizmoHelpBar, { ...gizmoHelp })] }));
         }
-        if (employeesOpen && !open) {
-            return (_jsxs(_Fragment, { children: [_jsx(EmployeesPanel, { employees: employeesList, hidden: employeesHidden, onClose: () => fetchNui("employeesClose") }), gizmoHelp && _jsx(GizmoHelpBar, { ...gizmoHelp })] }));
-        }
-        if (assignerOpen && assignerData && !open) {
-            return (_jsx(AssignerPanel, { empId: assignerData.empId, firstName: assignerData.firstName, lastName: assignerData.lastName, plots: assignerData.plots, initiallyAssigned: assignerData.assignedPlots, onClose: () => fetchNui("assignerClose") }));
-        }
-        if (empInfoOpen && empInfoData && !open) {
-            return (_jsx(EmployeeInfoPanel, { employee: empInfoData, onClose: () => fetchNui("employeeInfoClose") }));
-        }
         if (!open && gizmoHelp) {
             return _jsx(GizmoHelpBar, { ...gizmoHelp });
         }
-        return (_jsxs("div", { ref: rootRef, tabIndex: 0, autoFocus: true, onKeyDown: onKeyDown, onKeyUp: onKeyUp, onClick: onClick, onMouseDown: onMouseDown, onMouseUp: onMouseUp, onMouseMove: onMouseMove, onBlur: () => requestAnimationFrame(() => rootRef.current?.focus()), className: "fixed inset-0 outline-none", children: [activeAction === "watering" && (_jsx(WateringMeters, { pitcher: pitcherLevel, plantLevel: plantWaterLevel, showPlant: showPlantWater })), status && (_jsxs("div", { className: "absolute left-1/2 -translate-x-1/2 bottom-4 pointer-events-auto rounded-2xl bg-black/95 ring-1 ring-white/10 shadow-2xl overflow-hidden w-fit", children: [_jsxs("div", { className: "grid grid-cols-[auto_1fr_auto] items-center gap-4 px-5 h-9 border-b border-white/5 bg-white/[0.02]", children: [_jsx("span", { className: "text-[10px] uppercase tracking-[0.18em] text-white/45 whitespace-nowrap", children: "Plant Console" }), _jsx("div", { className: "flex justify-center items-center min-w-0 px-2 h-full", children: _jsx(ActionHintInline, { activeAction: activeAction }) }), _jsx("span", { className: "w-0", "aria-hidden": true })] }), _jsxs("div", { className: "flex items-stretch divide-x divide-white/5", children: [_jsx(ActionsSection, { actions: actions, activeAction: activeAction, onSelect: onSelect, onCancelAction: onCancelAction, onClose: onClose }), _jsx(StatusSection, { status: status })] })] }))] }));
+        return (_jsxs("div", { ref: rootRef, tabIndex: 0, autoFocus: true, onKeyDown: onKeyDown, onKeyUp: onKeyUp, onClick: onClick, onMouseDown: onMouseDown, onMouseUp: onMouseUp, onMouseMove: onMouseMove, onBlur: () => requestAnimationFrame(() => rootRef.current?.focus()), className: "fixed inset-0 outline-none", children: [activeAction === "watering" && (_jsx(WateringMeters, { pitcher: pitcherLevel, plantLevel: plantWaterLevel, showPlant: showPlantWater })), status && (_jsxs("div", { className: "absolute left-1/2 -translate-x-1/2 bottom-4 pointer-events-auto rounded-2xl bg-black/95 ring-1 ring-white/10 shadow-2xl w-fit", children: [_jsxs("div", { className: "grid grid-cols-[auto_1fr_auto] items-center gap-4 px-5 h-9 border-b border-white/5 bg-white/[0.02]", children: [_jsx("span", { className: "text-[10px] uppercase tracking-[0.18em] text-white/45 whitespace-nowrap", children: "Plant Console" }), _jsx("div", { className: "flex justify-center items-center min-w-0 px-2 h-full", children: _jsx(ActionHintInline, { activeAction: activeAction }) }), _jsx("span", { className: "w-0", "aria-hidden": true })] }), _jsxs("div", { className: "flex items-stretch divide-x divide-white/5", children: [_jsx(ActionsSection, { actions: actions, activeAction: activeAction, onSelect: onSelect, onCancelAction: onCancelAction, onClose: onClose }), _jsx(StatusSection, { status: status })] })] }))] }));
     })();
     return _jsxs(_Fragment, { children: [panelEl, hudOverlay] });
 }

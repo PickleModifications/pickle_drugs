@@ -286,7 +286,7 @@ RegisterNetEvent("pickle_drugs:plant", function(plotId)
     if (plot.stage_started_at or 0) > 0 then
         notify(src, PLANT_ERR.already_planted, "error") return
     end
-    local seedItem = drugCfg.planting and drugCfg.planting.seedItem
+    local seedItem = drugCfg.seedItem
     if not consumeItem(src, seedItem, 1, "You need a seed for this plant") then return end
 
     local ok, reason = Grow.PerformPlant(plot, drugCfg, now())
@@ -334,7 +334,7 @@ RegisterNetEvent("pickle_drugs:cutBud", function(plotId, budIndex)
     local ok = Grow.PerformCutBud(plot, drugCfg, budIndex)
     if not ok then return end
 
-    local harvestItem = drugCfg and drugCfg.cutting and drugCfg.cutting.harvestItem
+    local harvestItem = drugCfg and drugCfg.harvestItem
     if harvestItem and Inventory and Inventory.AddItem then
         Inventory.AddItem(src, harvestItem, 1)
     end

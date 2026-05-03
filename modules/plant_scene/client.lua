@@ -15,8 +15,7 @@ local Scene = nil
 --   cam,
 --   currentPose = { coords, point, fov },
 --   tween       = { startMs, durMs, from, to, onDone } | nil,
---   activeAction = "menu" | "soiling" | "planting" | "watering" | "cutting" | "inspect",
---   inspectAngle = number,         -- degrees, advances each frame
+--   activeAction = "menu" | "soiling" | "planting" | "watering" | "cutting",
 --   activeCancel = function | nil, -- forces the active sub-scene to tear down
 --   tearingDown,
 -- }
@@ -45,28 +44,15 @@ local function MenuPreset(spot)
     local center  = vector3(spot.coords.x, spot.coords.y, spot.coords.z)
     local heading = spot.coords.w or 0.0
     local rad     = math.rad(heading)
-    local distance = 2.6
+    local cam     = (Config.PlantScene and Config.PlantScene.menuCam) or {}
+    local distance = cam.distance or 2.6
     return {
         coords = vector3(
             center.x + math.sin(rad) * distance,
             center.y - math.cos(rad) * distance,
-            center.z + 1.45),
-        point = vector3(center.x, center.y, center.z + 0.75),
-        fov   = 40.0,
-    }
-end
-
-local function InspectPose(spot, angleDeg)
-    local center   = vector3(spot.coords.x, spot.coords.y, spot.coords.z)
-    local distance = 2.4
-    local rad      = math.rad(angleDeg)
-    return {
-        coords = vector3(
-            center.x + math.sin(rad) * distance,
-            center.y - math.cos(rad) * distance,
-            center.z + 1.05),
-        point = vector3(center.x, center.y, center.z + 0.6),
-        fov   = 38.0,
+            center.z + (cam.camZ or 1.45)),
+        point = vector3(center.x, center.y, center.z + (cam.lookZ or 0.75)),
+        fov   = cam.fov or 40.0,
     }
 end
 
@@ -75,7 +61,6 @@ local function PresetForAction(action)
     local spot    = Scene.spot
     local drugCfg = Scene.drugCfg
     if action == "menu"     then return MenuPreset(spot) end
-    if action == "inspect"  then return InspectPose(spot, Scene.inspectAngle or 0) end
     if action == "soiling"  and GetSoilingCamPreset  then return GetSoilingCamPreset(spot, drugCfg) end
     if action == "planting" and GetPlantingCamPreset then return GetPlantingCamPreset(spot, drugCfg) end
     if action == "watering" and GetWateringCamPreset then return GetWateringCamPreset(spot, drugCfg) end
@@ -177,7 +162,7 @@ local function RequiredItem(action, drugCfg)
         local n = Config.Items and Config.Items.soilBag
         if n then return { name = n, count = 1, label = "bag of soil" } end
     elseif action == "planting" then
-        local n = drugCfg and drugCfg.planting and drugCfg.planting.seedItem
+        local n = drugCfg and drugCfg.seedItem
         if n then return { name = n, count = 1, label = "seed" } end
     elseif action == "watering" then
         local n = Config.Items and Config.Items.wateringCan
@@ -227,21 +212,22 @@ local function ComputeActions(plot, drugCfg)
         return baseAvailable, baseReason
     end
 
+    local ps = Config.PlantScene or {}
     local soilingOk,  soilingReason  = gate("soiling",
-        needsSoil and drugCfg.soiling ~= nil,
+        needsSoil and ps.soiling ~= nil,
         (not needsSoil) and reason("Already soiled") or nil)
     local plantingOk, plantingReason = gate("planting",
-        needsSeed and drugCfg.planting ~= nil,
+        needsSeed and ps.planting ~= nil,
         needsSoil and reason("Needs soil first")
             or (not needsSeed) and reason("Already planted")
             or nil)
     local wateringOk, wateringReason = gate("watering",
-        (growing or (atHarvest and not waterFull)) and not waterFull and (growing or atHarvest) and drugCfg.watering ~= nil,
+        (growing or (atHarvest and not waterFull)) and not waterFull and (growing or atHarvest) and ps.watering ~= nil,
         (not (growing or atHarvest)) and reason("No plant yet")
             or waterFull and reason("Reservoir full")
             or nil)
     local cuttingOk,  cuttingReason  = gate("cutting",
-        hasBuds and drugCfg.cutting ~= nil,
+        hasBuds and ps.cutting ~= nil,
         (not atHarvest) and reason("Not ready to harvest")
             or (atHarvest and not hasBuds) and reason("All buds cut")
             or nil)
@@ -275,19 +261,24 @@ local function ComputeActions(plot, drugCfg)
             available = cuttingOk,
             reason = cuttingReason,
         },
-        {
-            id = "inspect",
-            label = "Inspect",
-            icon = "eye",
-            available = true,
-            reason = nil,
-        },
+        -- "settings = true" tells the NUI plant console to bucket these
+        -- under a single Gear "Settings" button instead of rendering them
+        -- inline, so the main row stays focused on grow actions.
         {
             id = "move",
             label = "Move",
             icon = "move",
             available = true,
             reason = nil,
+            settings = true,
+        },
+        {
+            id = "output",
+            label = "Destination",
+            icon = "package",
+            available = true,
+            reason = nil,
+            settings = true,
         },
         {
             id = "remove",
@@ -295,6 +286,7 @@ local function ComputeActions(plot, drugCfg)
             icon = "trash",
             available = true,
             reason = nil,
+            settings = true,
         },
     }
 end
@@ -386,12 +378,6 @@ local function StartCamThread()
                     ApplyPose(Scene.cam, pose)
                     Scene.currentPose = pose
                 end
-            elseif Scene.activeAction == "inspect" then
-                local rate = (Config.PlantScene and Config.PlantScene.inspectOrbitDegPerSec) or 12.0
-                Scene.inspectAngle = ((Scene.inspectAngle or 0) + rate * dt) % 360.0
-                local pose = InspectPose(Scene.spot, Scene.inspectAngle)
-                ApplyPose(Scene.cam, pose)
-                Scene.currentPose = pose
             end
 
             Wait(0)
@@ -433,18 +419,6 @@ local function StartAction(action)
     if not Scene or Scene.activeAction ~= "menu" then return end
     if Scene.tween then return end
 
-    if action == "inspect" then
-        -- Start the orbit from the spot's facing heading (matches the menu
-        -- camera's azimuth) so the cam doesn't tween across the plant.
-        Scene.inspectAngle = (Scene.spot.coords.w or 0.0) % 360.0
-        Scene.activeAction = "inspect"
-        PushSnapshot()
-        StartTween(InspectPose(Scene.spot, Scene.inspectAngle), TWEEN_MS, function()
-            PushSnapshot()
-        end)
-        return
-    end
-
     -- Move/Remove are management actions, not in-scene mini-flows: they
     -- close the plant scene first, then defer to housing (move) or fire
     -- the player-facing delete (remove). Server validates authorisation.
@@ -461,6 +435,20 @@ local function StartAction(action)
         local plotId = Scene.plotId
         ClosePlantScene()
         TriggerServerEvent("pickle_drugs:deleteHousePlot", plotId)
+        return
+    end
+    if action == "output" then
+        -- Output destination uses the same in-world picker style as the
+        -- worker plot assigner — close the scene first, then defer to
+        -- housing for the locker pick. Server validates ownership when
+        -- it receives the eventual setPlotOutput.
+        local hid = Scene.plot and Scene.plot.house_id
+        local plotId = Scene.plotId
+        local currentOutput = Scene.plot and Scene.plot.output_locker_id or nil
+        if hid then
+            ClosePlantScene()
+            TriggerEvent("pickle_drugs:openOutputPickerInScene", plotId, hid, currentOutput)
+        end
         return
     end
 
@@ -524,10 +512,6 @@ end
 local function CancelActiveAction()
     if not Scene then return end
     if Scene.activeAction == "menu" then return end
-    if Scene.activeAction == "inspect" then
-        ReturnToMenu()
-        return
-    end
     local fn = Scene.activeCancel
     Scene.activeCancel = nil
     if fn then fn() end -- the embedded cleanup invokes our onClose → ReturnToMenu
@@ -564,7 +548,6 @@ function OpenPlantScene(plotId)
         drugCfg      = drugCfg,
         cam          = cam,
         activeAction = "menu",
-        inspectAngle = 0.0,
     }
 
     local pose = MenuPreset(spot)
